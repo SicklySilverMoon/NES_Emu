@@ -17,6 +17,6 @@ impl Ppu {
     }
 
     pub fn reset(&mut self) {
-        todo!("Yeah")
+        //todo: yeah
     }
 }

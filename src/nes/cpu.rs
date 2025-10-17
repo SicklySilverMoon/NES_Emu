@@ -53,9 +53,11 @@ impl Cpu {
     }
 
     pub fn read(&mut self, addr: u16) -> u8 {
-        let val = self.bus.borrow_mut().read(addr);
-        self.pc += 1;
-        return val;
+        return self.bus.borrow_mut().read_inc(addr, Option::from(&mut self.pc));
+    }
+
+    pub fn read_16(&mut self, addr: u16) -> u16 {
+        return self.bus.borrow_mut().read_16_inc(addr, Option::from(&mut self.pc));
     }
 
     pub fn step(&mut self) {
@@ -79,40 +81,65 @@ impl Cpu {
     }
 
     fn handle_control_instr(&mut self, op: u8) {
+        let (read, write) = Cpu::opcode_needs_read_write(op);
 
+        let mut val: u8 = 0; //it should never actually get used with this, safeguard
+        if read {
+            match op & 0x1F {
+                0x00 => {
+                    if (op & 0xE0) >= 0x80 { //NOP, LDY, CPY, CPX
+                        val = self.read_immediate();
+                    }
+                    if (op & 0xE0) == 0x20 { //JSR
+                        val = self.read_absolute();
+                    }
+                },
+                0x04 => {
+                    if (op == 0x6C) {
+                        val = self.read_absolute();
+                    }
+                    val = self.read_zero_page();
+                }
+                _ => unreachable!("impossible value range somehow")
+            }
+        }
     }
 
     fn handle_alu_instr(&mut self, op: u8) {
-        let mut val: u8;
-        match (op & 0x1F) {
-            0x01 => {
-                val = self.get_x_indirect();
-            },
-            0x05 => {
-                val = self.get_zero_page();
-            },
-            0x09 => {
-                val = self.get_immediate();
-            },
-            0x0D => {
-                val = self.get_absolute();
-            },
-            0x11 => {
-                val = self.get_indirect_y();
-            },
-            0x15 => {
-                val = self.get_zero_page_x();
-            },
-            0x19 => {
-                val = self.get_absolute_y();
-            },
-            0x1D => {
-                val = self.get_absolute_x();
-            },
-            _ => unreachable!("impossible value range somehow")
+        let (read, write) = Cpu::opcode_needs_read_write(op);
+
+        let mut val: u8 = 0; //it should never actually get used with this, safeguard
+        if read {
+            match op & 0x1F {
+                0x01 => {
+                    val = self.read_x_indirect();
+                },
+                0x05 => {
+                    val = self.read_zero_page();
+                },
+                0x09 => {
+                    val = self.read_immediate();
+                },
+                0x0D => {
+                    val = self.read_absolute();
+                },
+                0x11 => {
+                    val = self.read_indirect_y();
+                },
+                0x15 => {
+                    val = self.read_zero_page_x();
+                },
+                0x19 => {
+                    val = self.read_absolute_y();
+                },
+                0x1D => {
+                    val = self.read_absolute_x();
+                },
+                _ => unreachable!("impossible value range somehow")
+            }
         }
 
-        match (op & 0xE0) {
+        match op & 0xE0 {
             0x00 => { //ORA
                 self.a = self.a | val;
                 self.z = u8::from(self.a == 0);
@@ -138,11 +165,7 @@ impl Cpu {
                 self.v = u8::from((self.a ^ pre_a) & (self.a ^ val) & 0x80 != 0)
             },
             0x80 => { //STA
-                if op == 0x89 {
-                    return; //0x89 is a NOP with an immediate operand (so 2 byte NOP)
-                } else {
-                    todo!("Store it, need to basically invert the get functions");
-                }
+                val = self.a;
             }
             0xA0 => { //LDA
                 self.a = val;
@@ -165,6 +188,36 @@ impl Cpu {
             }
             _ => unreachable!("impossible value range somehow")
         }
+
+        if write {
+            match op & 0x1F {
+                0x01 => {
+                    self.write_x_indirect(val);
+                },
+                0x05 => {
+                    self.write_zero_page(val);
+                },
+                0x09 => {
+                    self.write_immediate(val);
+                },
+                0x0D => {
+                    self.write_absolute(val);
+                },
+                0x11 => {
+                    self.write_indirect_y(val);
+                },
+                0x15 => {
+                    self.write_zero_page_x(val);
+                },
+                0x19 => {
+                    self.write_absolute_y(val);
+                },
+                0x1D => {
+                    self.write_absolute_x(val);
+                },
+                _ => unreachable!("impossible value range somehow")
+            }
+        }
     }
 
     fn handle_rmw_instr(&mut self, op: u8) {
@@ -175,57 +228,184 @@ impl Cpu {
 
     }
 
-    fn get_x_indirect(&mut self) -> u8 {
+    fn opcode_needs_read_write(op: u8) -> (bool, bool) { //read, write
+        //https://www.nesdev.org/wiki/CPU_unofficial_opcodes used as reference
+        if op == 0x84 | 0x9C { //control block, STY, SHY
+            return (false, true)
+        }
+        if op == 0x8E | 0x96 | 0x9E { //control block, STY, SHY
+            return (false, true)
+        }
+        match (op & 0x1F) {
+            0x00 | 0x04 | 0x08 | 0x0C | 0x10 | 0x14 | 0x18 | 0x1C => { //control instructions
+                match (op & 0x1F) {
+                    0x04 | 0x0C | 0x10 | 0x14 | 0x1C => {
+                        return (true, false); //notably, this ends up not covering earlier exceptions
+                    }
+                    0x00 => {
+                        if (op & 0x0E >= 0x80) || (op & 0x0E == 0x20) { //bunch of loads and a JSR
+                            return (true, false);
+                        }
+                        return (false, false);
+                    }
+                    _ => unreachable!("impossible value range somehow")
+                }
+            },
+            0x01 | 0x05 | 0x09 | 0x0D | 0x11 | 0x15 | 0x19 | 0x1D => { //alu instructions
+                match (op & 0x1F) {
+                    0x00 | 0x20 | 0x40 | 0x60 | 0xA0 | 0xC0 | 0xE0 => { //the rest, which all read
+                        return (true, false);
+                    },
+                    0x80 => { //STA
+                        return (false, true);
+                    },
+                    _ => unreachable!("impossible value range somehow")
+                }
+            },
+            0x02 | 0x06 | 0x0A | 0x0E | 0x12 | 0x16 | 0x1A | 0x1E => { //rmw instructions
+                match (op & 0x1F) {
+                    0x06 | 0x0E | 0x16 | 0x1E => {
+                        return (true, false);
+                    }
+                    0x02 => {
+                        if (op & 0x0E >= 0x80) || (op & 0x0E == 0x20) { //bunch of loads and a JSR
+                            return (true, false);
+                        }
+                        return (false, false);
+                    }
+                    _ => unreachable!("impossible value range somehow")
+                }
+            },
+            0x03 | 0x07 | 0x0B | 0x0F | 0x13 | 0x17 | 0x1B | 0x1F => { //rmw alu instructions
+                //todo: agony agony agony agony
+            },
+            _ => unreachable!("impossible value range somehow")
+        }
+        return (false, false);
+    }
+
+    fn get_x_indirect_addr(&mut self) -> u16 {
+        let zp = self.read(self.pc).wrapping_add(self.x);
+        return self.bus.borrow_mut().read_16(zp as u16);
+    }
+
+    fn read_x_indirect(&mut self) -> u8 {
+        let addr = self.get_x_indirect_addr();
+        return self.bus.borrow_mut().read(addr);
+    }
+
+    fn write_x_indirect(&mut self, val: u8) {
+        let addr = self.get_x_indirect_addr();
+        self.bus.borrow_mut().write(addr, val);
+    }
+
+    fn get_indirect_y_addr(&mut self) -> u16 {
         let zp = self.read(self.pc);
-        let zp = zp + self.x;
-
-        let low = self.bus.borrow_mut().read(zp as u16) as u16;
-        let high = self.bus.borrow_mut().read((zp + 1) as u16) as u16;
-        return self.bus.borrow_mut().read(high << 8 | low);
+        return self.bus.borrow_mut().read_16(zp as u16).wrapping_add(self.y as u16);
     }
 
-    fn get_indirect_y(&mut self) -> u8 {
-        let zp = self.read(self.pc);
-
-        let low = self.bus.borrow_mut().read(zp as u16) as u16;
-        let high = self.bus.borrow_mut().read((zp + 1) as u16) as u16;
-        return self.bus.borrow_mut().read(high << 8 | low + self.y as u16);
+    fn read_indirect_y(&mut self) -> u8 {
+        let addr = self.get_indirect_y_addr();
+        return self.bus.borrow_mut().read(addr);
     }
 
-    fn get_immediate(&mut self) -> u8 {
-        return self.read(self.pc)
+    fn write_indirect_y(&mut self, val: u8) {
+        let addr = self.get_indirect_y_addr();
+        self.bus.borrow_mut().write(addr, val);
     }
 
-    fn get_zero_page(&mut self) -> u8 {
-        let zp = self.read(self.pc) as u16;
-        return self.bus.borrow_mut().read(zp);
+    //notably, immediate mode does not get a get since it's not fetching an address
+
+    fn read_immediate(&mut self) -> u8 {
+        return self.read(self.pc);
     }
 
-    fn get_zero_page_x(&mut self) -> u8 {
-        let zp = (self.read(self.pc) + self.x) as u16;
-        return self.bus.borrow_mut().read(zp);
+    fn write_immediate(&mut self, val: u8) {
+        self.pc += 1;
+        //that's it, just the increment
     }
 
-    fn get_zero_page_y(&mut self) -> u8 {
-        let zp = (self.read(self.pc) + self.y) as u16;
-        return self.bus.borrow_mut().read(zp);
+    fn get_zero_page_addr(&mut self) -> u16 {
+        return self.read(self.pc) as u16;
     }
 
-    fn get_absolute(&mut self) -> u8 {
-        let low = self.read(self.pc) as u16;
-        let high = self.read(self.pc) as u16;
-        return self.bus.borrow_mut().read(high << 8 | low);
+    fn read_zero_page(&mut self) -> u8 {
+        let addr = self.get_zero_page_addr();
+        return self.bus.borrow_mut().read(addr);
     }
 
-    fn get_absolute_x(&mut self) -> u8 {
-        let low = self.read(self.pc) as u16;
-        let high = self.read(self.pc) as u16;
-        return self.bus.borrow_mut().read(high << 8 | low + self.x as u16);
+    fn write_zero_page(&mut self, val: u8) {
+        let addr = self.get_zero_page_addr();
+        self.bus.borrow_mut().write(addr, val);
     }
 
-    fn get_absolute_y(&mut self) -> u8 {
-        let low = self.read(self.pc) as u16;
-        let high = self.read(self.pc) as u16;
-        return self.bus.borrow_mut().read(high << 8 | low + self.y as u16);
+    fn get_zero_page_x_addr(&mut self) -> u16 {
+        return self.read(self.pc).wrapping_add(self.x) as u16;
+    }
+
+    fn read_zero_page_x(&mut self) -> u8 {
+        let addr = self.get_zero_page_x_addr();
+        return self.bus.borrow_mut().read(addr);
+    }
+
+    fn write_zero_page_x(&mut self, val: u8) {
+        let addr = self.get_zero_page_x_addr();
+        self.bus.borrow_mut().write(addr, val);
+    }
+
+    fn get_zero_page_y_addr(&mut self) -> u16 {
+        return self.read(self.pc).wrapping_add(self.y) as u16;
+    }
+
+    fn read_zero_page_y(&mut self) -> u8 {
+        let addr = self.get_zero_page_y_addr();
+        return self.bus.borrow_mut().read(addr);
+    }
+
+    fn write_zero_page_y(&mut self, val: u8) {
+        let addr = self.get_zero_page_y_addr();
+        self.bus.borrow_mut().write(addr, val);
+    }
+
+    fn get_absolute_addr(&mut self) -> u16 {
+        return self.read_16(self.pc);
+    }
+
+    fn read_absolute(&mut self) -> u8 {
+        let addr = self.get_absolute_addr();
+        return self.bus.borrow_mut().read(addr);
+    }
+
+    fn write_absolute(&mut self, val: u8) {
+        let addr = self.get_absolute_addr();
+        self.bus.borrow_mut().write(addr, val);
+    }
+
+    fn get_absolute_x_addr(&mut self) -> u16 {
+        return self.read_16(self.pc).wrapping_add(self.x as u16);
+    }
+
+    fn read_absolute_x(&mut self) -> u8 {
+        let addr = self.get_absolute_x_addr();
+        return self.bus.borrow_mut().read(addr);
+    }
+
+    fn write_absolute_x(&mut self, val: u8) {
+        let addr = self.get_absolute_x_addr();
+        return self.bus.borrow_mut().write(addr, val);
+    }
+
+    fn get_absolute_y_addr(&mut self) -> u16 {
+        return self.read_16(self.pc).wrapping_add(self.y as u16);
+    }
+
+    fn read_absolute_y(&mut self) -> u8 {
+        let addr = self.get_absolute_y_addr();
+        return self.bus.borrow_mut().read(addr);
+    }
+
+    fn write_absolute_y(&mut self, val: u8) {
+        let addr = self.get_absolute_y_addr();
+        return self.bus.borrow_mut().write(addr, val);
     }
 }
