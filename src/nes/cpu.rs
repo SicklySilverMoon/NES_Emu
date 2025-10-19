@@ -12,14 +12,14 @@ pub struct Cpu {
     y: u8,
     a: u8,
 
-    s: u8,
-    c: u8,
-    z: u8,
-    i: u8,
-    d: u8,
-    b: u8,
-    v: u8,
-    n: u8,
+    s: u8, //stack pointer
+    c: bool, //carry flag
+    z: bool, //zero flag
+    i: bool, //interrupt disable flag
+    d: bool, //decimal mode flag (lol)
+    b: bool, //break command flag
+    v: bool, //overflow flag
+    n: bool, //negative flag
 }
 
 impl Cpu {
@@ -33,13 +33,13 @@ impl Cpu {
             a: 0,
 
             s: 0,
-            c: 0,
-            z: 0,
-            i: 0,
-            d: 0,
-            b: 0,
-            v: 0,
-            n: 0,
+            c: false,
+            z: false,
+            i: false,
+            d: false,
+            b: false,
+            v: false,
+            n: false,
         };
         let cpu = Rc::new(RefCell::new(cpu));
         cpu.borrow_mut().bus.borrow_mut().set_cpu(Rc::downgrade(&cpu));
@@ -84,6 +84,7 @@ impl Cpu {
         let (read, write) = Cpu::opcode_needs_read_write(op);
 
         let mut val: u8 = 0; //it should never actually get used with this, safeguard
+        let mut val_16: u16 = 0;
         if read {
             match op & 0x1F {
                 0x00 => {
@@ -91,15 +92,170 @@ impl Cpu {
                         val = self.read_immediate();
                     }
                     if (op & 0xE0) == 0x20 { //JSR
-                        val = self.read_absolute();
+                        val_16 = self.get_absolute_addr();
                     }
                 },
                 0x04 => {
-                    if (op == 0x6C) {
+                    val = self.read_zero_page();
+                },
+                0x0C => {
+                    if (op == 0x6C) { //JMP
+                        val_16 = self.read_indirect_16();
+                    } else if (op == 0x4C) { //JMP
+                        val_16 = self.get_absolute_addr();
+                    } else {
                         val = self.read_absolute();
                     }
-                    val = self.read_zero_page();
+                },
+                0x10 => {
+                    val = self.read_immediate(); //gonna have to transform these to a signed value for most branches
+                },
+                0x14 => {
+                    val = self.read_zero_page_x();
+                },
+                0x1C => {
+                    val = self.read_absolute_x();
+                },
+                _ => unreachable!("impossible value range somehow")
+            }
+        }
+
+        let mut matched = false;
+        match op {
+            0x04 | 0x0C | 0x14 | 0x1C |
+            0x34 | 0x3C |
+            0x44 | 0x54 | 0x5C |
+            0x64 | 0x74 | 0x7C |
+            0x80 |
+            0xD4 | 0xDC |
+            0xF4 | 0xFC => {
+                matched = true; //the NOPs (note: some of these have differing cycle lengths, which might need to be dealt with eventually)
+            },
+            0xA0 | 0xA4 | 0xB4 | 0xAC | 0xBC => { //LDY
+                matched = true;
+                self.y = val;
+                self.z = self.y == 0;
+                self.n = self.y & 0x80 == 0x80;
+            },
+            0xC0 | 0xC4 | 0xCC => { //CPY
+                matched = true;
+                let result = self.y - val;
+                self.c = self.y >= val;
+                self.z = result == 0;
+                self.n = result & 0x80 == 0x80;
+            },
+            0xE0 | 0xE4 | 0xEC => { //CPX
+                matched = true;
+                let result = self.x - val;
+                self.c = self.x >= val;
+                self.z = result == 0;
+                self.n = result & 0x80 == 0x80;
+            },
+            0x24 | 0x2C => { //BIT
+                let result = self.a & val;
+                self.z = result == 0;
+                self.v = result & 0x40 == 0x40;
+                self.n = result & 0x80 == 0x80;
+            },
+            _ => (),
+        }
+        if !matched {
+            if op & 0x1F == 0x00 {
+                if op == 0x00 { //BRK
+                    self.push_stack_16(self.pc.wrapping_add(1)); //it's weird but BRK does just fully skip a byte
+                    self.push_stack_flags();
+                    self.pc = 0xFFFE;
+                } else if op == 0x20 { //JSR
+                    self.push_stack_16(self.pc.wrapping_sub(1)); //notably, JSR points to one before the next instruction, conflicting with our method of reading operands first
+                    self.pc = val_16;
+                } else if op == 0x40 { //RTI
+                    self.pop_stack_flags();
+                    self.pc = self.pop_stack_16();
+                } else if op == 0x60 { //RTS
+                    self.pc = self.pop_stack_16().wrapping_add(1);
                 }
+            } //0x04 is covered by earlier cases (NOP, BIT, STY, LDY, CPY, CPX)
+            else if op & 0x1F == 0x08 {
+                if op == 0x08 { //PHP
+                    self.push_stack_flags();
+                } else if op == 0x28 { //PLP
+                    self.pop_stack_flags();
+                } else if op == 0x48 { //PHA
+                    self.push_stack(self.a);
+                } else if op == 0x68 { //PLA
+                    self.a = self.pop_stack();
+                } else if op == 0x88 { //DEY
+                    self.y = self.y.wrapping_sub(1);
+                    self.z = self.y == 0;
+                    self.n = self.y & 0x80 == 0x80;
+                } else if op == 0xA8 { //TAY
+                    self.y = self.a;
+                    self.z = self.y == 0;
+                    self.n = self.y & 0x80 == 0x80;
+                } else if op == 0xC8 { //INY
+                    self.y = self.y.wrapping_add(1);
+                    self.z = self.y == 0;
+                    self.n = self.y & 0x80 == 0x80;
+                } else if op == 0xE8 { //INX
+                    self.x = self.x.wrapping_add(1);
+                    self.z = self.x == 0;
+                    self.n = self.x & 0x80 == 0x80;
+                }
+            } else if op & 0x1F == 0x0A {
+                self.pc = val_16; //JMP
+            } else if op & 0x1F == 0x10 {
+                if op == 0x10 && !self.n {
+                    self.pc = self.pc.wrapping_add_signed(val as i8 as i16); //BPL
+                } else if op == 0x30 && self.n {
+                    self.pc = self.pc.wrapping_add_signed(val as i8 as i16); //BMI
+                } else if op == 0x50 && self.v {
+                    self.pc = self.pc.wrapping_add_signed(val as i8 as i16); //BVC
+                } else if op == 0x70 && !self.v {
+                    self.pc = self.pc.wrapping_add_signed(val as i8 as i16); //BVS
+                } else if op == 0x90 && self.c {
+                    self.pc = self.pc.wrapping_add_signed(val as i8 as i16); //BCC
+                } else if op == 0xB0 && !self.c {
+                    self.pc = self.pc.wrapping_add_signed(val as i8 as i16); //BCS
+                } else if op == 0xD0 && self.z {
+                    self.pc = self.pc.wrapping_add_signed(val as i8 as i16); //BNE
+                } else if op == 0xF0 && !self.z {
+                    self.pc = self.pc.wrapping_add_signed(val as i8 as i16); //BEQ
+                }
+            } //0x14 is covered by earlier cases (NOP, STY, LDY)
+            else if op & 0x1F == 0x18 {
+                let shifted = (op & 0x0E) >> 4;
+                if shifted <= 0x2 {
+                    self.c = ((shifted >> 1) & 0b1) == 1; //CLC and SEC
+                } else if shifted <= 0x6 {
+                    self.i = ((shifted >> 1) & 0b1) == 1; //CLI and SEI
+                } else if shifted <= 0xA {
+                    if op == 0x98 {
+                        self.a = self.y; //TYA
+                    } else {
+                        self.v = false; //CLV
+                    }
+                } else if shifted <= 0xE {
+                    self.d = ((shifted >> 1) & 0b1) == 1; //CLD and SED
+                }
+            } else if op & 0x1F == 0x1C {
+                todo!("SHY executed!") //SHY, lol
+            }
+        }
+
+        if write {
+            match op & 0x1F {
+                0x04 => {
+                    self.write_zero_page(val);
+                },
+                0x0C => {
+                    self.write_absolute(val);
+                },
+                0x14 => {
+                    self.write_zero_page_x(val);
+                },
+                0x1C => {
+                    self.write_absolute_x(val);
+                },
                 _ => unreachable!("impossible value range somehow")
             }
         }
@@ -139,52 +295,52 @@ impl Cpu {
             }
         }
 
-        match op & 0xE0 {
+        match op & 0xE0 { //actual implementations
             0x00 => { //ORA
                 self.a = self.a | val;
-                self.z = u8::from(self.a == 0);
-                self.n = u8::from(self.a & 0x80 == 0x80);
+                self.z = self.a == 0;
+                self.n = self.a & 0x80 == 0x80;
             },
             0x20 => { //AND
                 self.a = self.a & val;
-                self.z = u8::from(self.a == 0);
-                self.n = u8::from(self.a & 0x80 == 0x80);
+                self.z = self.a == 0;
+                self.n = self.a & 0x80 == 0x80;
             },
             0x40 => { //EOR/XOR
                 self.a = self.a ^ val;
-                self.z = u8::from(self.a == 0);
-                self.n = u8::from(self.a & 0x80 == 0x80);
+                self.z = self.a == 0;
+                self.n = self.a & 0x80 == 0x80;
             },
             0x60 => { //ADC
                 let pre_a = self.a;
-                self.a = self.a.wrapping_add(val).wrapping_add(self.c);
+                self.a = self.a.wrapping_add(val).wrapping_add(u8::from(self.c));
 
-                self.c = u8::from((pre_a as u16 + val as u16 + self.c as u16) > 0xFF); //todo: stupid way of doing this, fix that
-                self.z = u8::from(self.a == 0);
-                self.n = u8::from(self.a & 0x80 == 0x80);
-                self.v = u8::from((self.a ^ pre_a) & (self.a ^ val) & 0x80 != 0)
+                self.c = (pre_a as u16 + val as u16 + self.c as u16) > 0xFF; //todo: stupid way of doing this, fix that
+                self.z = self.a == 0;
+                self.n = self.a & 0x80 == 0x80;
+                self.v = (self.a ^ pre_a) & (self.a ^ val) & 0x80 != 0
             },
             0x80 => { //STA
                 val = self.a;
             }
             0xA0 => { //LDA
                 self.a = val;
-                self.z = u8::from(self.a == 0);
-                self.n = u8::from(self.a & 0x80 == 0x80);
+                self.z = self.a == 0;
+                self.n = self.a & 0x80 == 0x80;
             }
             0xC0 => { //CMP
-                self.c = u8::from(self.a >= val);
-                self.z = u8::from(self.a == val);
-                self.n = u8::from((self.a - val) & 0x80 == 0x80);
+                self.c = self.a >= val;
+                self.z = self.a == val;
+                self.n = (self.a - val) & 0x80 == 0x80;
             }
             0xE0 => { //SBC
                 let pre_a = self.a;
-                self.a = self.a.wrapping_sub(val).wrapping_sub(!self.c);
+                self.a = self.a.wrapping_sub(val).wrapping_sub(!self.c as u8);
 
-                self.c = u8::from(!(pre_a as i16 - val as i16 - (!self.c) as i16) < 0);
-                self.z = u8::from(self.a == 0);
-                self.n = u8::from(self.a & 0x80 == 0x80);
-                self.v = u8::from((self.a ^ pre_a) & (self.a ^ !val) & 0x80 != 0)
+                self.c = !(pre_a as i16 - val as i16 - (!self.c) as i16) < 0;
+                self.z = self.a == 0;
+                self.n = self.a & 0x80 == 0x80;
+                self.v = (self.a ^ pre_a) & (self.a ^ !val) & 0x80 != 0
             }
             _ => unreachable!("impossible value range somehow")
         }
@@ -282,6 +438,56 @@ impl Cpu {
             _ => unreachable!("impossible value range somehow")
         }
         return (false, false);
+    }
+
+    fn push_stack(&mut self, val: u8) {
+        let addr = 0x0100u16 + self.s as u16;
+        self.s = self.s.wrapping_sub(1);
+        self.bus.borrow_mut().write(addr, val);
+    }
+
+    fn push_stack_flags(&mut self) {
+        let val: u8 = (self.n as u8) << 7 | (self.v as u8) << 6 | 1 << 5 | 1 << 4 | (self.d as u8) << 3 | (self.i as u8) << 2 | (self.z as u8) << 1 | (self.c as u8) << 0;
+        self.push_stack(val);
+    }
+
+    fn push_stack_16(&mut self, val: u16) {
+        self.push_stack((val & 0xFF) as u8);
+        self.push_stack((val >> 8) as u8);
+    }
+
+    fn pop_stack(&mut self) -> u8 {
+        let addr = 0x0100u16 + self.s as u16;
+        self.s = self.s.wrapping_add(1);
+        return self.bus.borrow_mut().read(addr);
+    }
+
+    fn pop_stack_flags(&mut self) {
+        let flags = self.pop_stack();
+        self.n = (flags & 0b10000000) != 0;
+        self.v = (flags & 0b01000000) != 0;
+        //note the two values missing, that's intentional
+        self.d = (flags & 0b00001000) != 0;
+        self.i = (flags & 0b00000100) != 0;
+        self.z = (flags & 0b00000010) != 0;
+        self.c = (flags & 0b00000001) != 0;
+    }
+
+    fn pop_stack_16(&mut self) -> u16 {
+        let low = self.pop_stack() as u16;
+        let high = self.pop_stack() as u16;
+        return (high << 8) | low;
+    }
+
+    fn read_indirect_16(&mut self) -> u16 {
+        let low_1 = self.read(self.pc);
+        let high_1 = self.read(self.pc.wrapping_add(1));
+        let addr_1 = (high_1 as u16) << 8 | low_1 as u16;
+        let addr_2 = (high_1 as u16) << 8 | low_1.wrapping_add(1) as u16; //weird bug where only the lower byte is incremented
+
+        let low_2 = self.bus.borrow_mut().read(addr_1);
+        let high_2 = self.bus.borrow_mut().read(addr_2);
+        return (high_2 as u16) << 8 | low_2 as u16;
     }
 
     fn get_x_indirect_addr(&mut self) -> u16 {
