@@ -1,9 +1,9 @@
 use std::cell::RefCell;
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 
+use crate::nes::bus::Bus;
 use crate::nes::cpu::Cpu;
 use crate::nes::ppu::Ppu;
-use crate::nes::bus::Bus;
 
 pub struct Nes {
     cpu: Rc<RefCell<Cpu>>,

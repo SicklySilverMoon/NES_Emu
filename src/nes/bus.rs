@@ -1,6 +1,7 @@
-use std::{env, fs};
 use std::cell::RefCell;
-use std::rc::{Rc, Weak};
+use std::rc::Weak;
+use std::{env, fs};
+
 use crate::nes::cpu::Cpu;
 use crate::nes::ppu::Ppu;
 
@@ -47,10 +48,12 @@ impl Bus {
     pub fn read_inc(&mut self, addr: u16, pc: Option<&mut u16>) -> u8 {
         pc.map(|pc| *pc = pc.wrapping_add(1)); //technically not what map should be used for, but its fineee
         if addr < 0x2000 {
-            return self.ram[addr as usize % 0x800]
+            self.last_read = self.ram[addr as usize % 0x800];
+            return self.last_read
         }
         if addr >= 0x8000 { //todo: yeah this will be a fun one, gonna have to make a Cartridge/Mapper class
-            return self.rom[addr as usize - 0x8000]
+            self.last_read = self.rom[addr as usize - 0x8000];
+            return self.last_read
         }
 
         return 0

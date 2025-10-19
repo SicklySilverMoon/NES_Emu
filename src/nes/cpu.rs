@@ -63,7 +63,7 @@ impl Cpu {
     pub fn step(&mut self) {
         let op = self.read(self.pc);
 
-        match (op & 0x1F) {
+        match op & 0x1F {
             0x00 | 0x04 | 0x08 | 0x0C | 0x10 | 0x14 | 0x18 | 0x1C => {
                 self.handle_control_instr(op);
             },
@@ -99,9 +99,9 @@ impl Cpu {
                     val = self.read_zero_page();
                 },
                 0x0C => {
-                    if (op == 0x6C) { //JMP
+                    if op == 0x6C { //JMP
                         val_16 = self.read_indirect_16();
-                    } else if (op == 0x4C) { //JMP
+                    } else if op == 0x4C { //JMP
                         val_16 = self.get_absolute_addr();
                     } else {
                         val = self.read_absolute();
@@ -392,9 +392,9 @@ impl Cpu {
         if op == 0x8E | 0x96 | 0x9E { //control block, STY, SHY
             return (false, true)
         }
-        match (op & 0x1F) {
+        match op & 0x1F {
             0x00 | 0x04 | 0x08 | 0x0C | 0x10 | 0x14 | 0x18 | 0x1C => { //control instructions
-                match (op & 0x1F) {
+                match op & 0x1F {
                     0x04 | 0x0C | 0x10 | 0x14 | 0x1C => {
                         return (true, false); //notably, this ends up not covering earlier exceptions
                     }
@@ -408,7 +408,7 @@ impl Cpu {
                 }
             },
             0x01 | 0x05 | 0x09 | 0x0D | 0x11 | 0x15 | 0x19 | 0x1D => { //alu instructions
-                match (op & 0x1F) {
+                match op & 0x1F {
                     0x00 | 0x20 | 0x40 | 0x60 | 0xA0 | 0xC0 | 0xE0 => { //the rest, which all read
                         return (true, false);
                     },
@@ -419,7 +419,7 @@ impl Cpu {
                 }
             },
             0x02 | 0x06 | 0x0A | 0x0E | 0x12 | 0x16 | 0x1A | 0x1E => { //rmw instructions
-                match (op & 0x1F) {
+                match op & 0x1F {
                     0x06 | 0x0E | 0x16 | 0x1E => {
                         return (true, false);
                     }
