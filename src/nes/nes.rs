@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::ops::DerefMut;
 use std::rc::Rc;
 
 use crate::nes::bus::Bus;
@@ -21,6 +22,10 @@ impl Nes {
         }
     }
 
+    pub fn is_halted(&self) -> bool {
+        self.cpu.borrow().is_halted()
+    }
+
     pub fn reset(&mut self) {
         self.bus.borrow_mut().reset();
         self.cpu.borrow_mut().reset();
@@ -28,6 +33,12 @@ impl Nes {
     }
 
     pub fn step(&mut self) {
-        
+        if !self.is_halted() {
+            let cpu_cycles = self.cpu.borrow_mut().step();
+            let mut ppu = self.ppu.borrow_mut();
+            for _ in 0..(cpu_cycles * 3) {
+                ppu.step();
+            }
+        }
     }
 }

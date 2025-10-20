@@ -9,7 +9,11 @@ use std::time::Duration;
 
 pub fn main() {
     let mut nes = nes::nes::Nes::new();
-    nes.reset();
+    nes.reset(); //todo: soon to be unneeded, init states set most up, but reset still loads ROM
+    loop { //temp
+        nes.step();
+    }
+
 
     let sdl_context = sdl3::init().unwrap();
     let video_subsystem = sdl_context.video().unwrap();

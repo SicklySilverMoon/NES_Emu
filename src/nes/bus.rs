@@ -79,6 +79,6 @@ impl Bus {
             self.ram[addr as usize % 0x800] = data;
         }
         //notably we do not write to ROM
-        todo!("rest of it")
+        //todo rest of it
     }
 }

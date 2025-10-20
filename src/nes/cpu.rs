@@ -13,6 +13,7 @@ pub struct Cpu {
     a: u8,
 
     s: u8, //stack pointer
+
     c: bool, //carry flag
     z: bool, //zero flag
     i: bool, //interrupt disable flag
@@ -20,6 +21,9 @@ pub struct Cpu {
     b: bool, //break command flag
     v: bool, //overflow flag
     n: bool, //negative flag
+
+    cycles: u8, //how many cycles this instruction took
+    halted: bool, //if the CPU is halted
 }
 
 impl Cpu {
@@ -32,35 +36,48 @@ impl Cpu {
             y: 0,
             a: 0,
 
-            s: 0,
+            s: 0xFF, //todo: not correct but works for now given the reset is called (should be 0xFD at power cause 0xFF - 3)
+
             c: false,
             z: false,
-            i: false,
+            i: true,
             d: false,
             b: false,
             v: false,
             n: false,
+
+            cycles: 0,
+            halted: false,
         };
         let cpu = Rc::new(RefCell::new(cpu));
         cpu.borrow_mut().bus.borrow_mut().set_cpu(Rc::downgrade(&cpu));
         return cpu;
     }
 
+    pub fn is_halted(&self) -> bool {
+        return self.halted;
+    }
+
     pub fn reset(&mut self) {
         let pc_high = (self.bus.borrow_mut().read(0xFFFD) as u16) << 8;
         let pc_low = self.bus.borrow_mut().read(0xFFFC) as u16;
-        self.pc = pc_high | pc_low
+        self.pc = pc_high | pc_low;
+
+        self.s = self.s.wrapping_sub(3);
+        self.i = true;
+        self.halted = false;
     }
 
-    pub fn read(&mut self, addr: u16) -> u8 {
+    fn read(&mut self, addr: u16) -> u8 {
         return self.bus.borrow_mut().read_inc(addr, Option::from(&mut self.pc));
     }
 
-    pub fn read_16(&mut self, addr: u16) -> u16 {
+    fn read_16(&mut self, addr: u16) -> u16 {
         return self.bus.borrow_mut().read_16_inc(addr, Option::from(&mut self.pc));
     }
 
-    pub fn step(&mut self) {
+    pub fn step(&mut self) -> u8 {
+        self.cycles = 0;
         let op = self.read(self.pc);
 
         match op & 0x1F {
@@ -78,6 +95,7 @@ impl Cpu {
             },
             _ => unreachable!("impossible value range somehow")
         }
+        return self.cycles;
     }
 
     fn handle_control_instr(&mut self, op: u8) {
@@ -201,24 +219,24 @@ impl Cpu {
                     self.z = self.x == 0;
                     self.n = self.x & 0x80 == 0x80;
                 }
-            } else if op & 0x1F == 0x0A {
+            } else if op & 0x1F == 0x0C {
                 self.pc = val_16; //JMP
             } else if op & 0x1F == 0x10 {
                 if op == 0x10 && !self.n {
                     self.pc = self.pc.wrapping_add_signed(val as i8 as i16); //BPL
                 } else if op == 0x30 && self.n {
                     self.pc = self.pc.wrapping_add_signed(val as i8 as i16); //BMI
-                } else if op == 0x50 && self.v {
+                } else if op == 0x50 && !self.v {
                     self.pc = self.pc.wrapping_add_signed(val as i8 as i16); //BVC
-                } else if op == 0x70 && !self.v {
+                } else if op == 0x70 && self.v {
                     self.pc = self.pc.wrapping_add_signed(val as i8 as i16); //BVS
-                } else if op == 0x90 && self.c {
+                } else if op == 0x90 && !self.c {
                     self.pc = self.pc.wrapping_add_signed(val as i8 as i16); //BCC
-                } else if op == 0xB0 && !self.c {
+                } else if op == 0xB0 && self.c {
                     self.pc = self.pc.wrapping_add_signed(val as i8 as i16); //BCS
-                } else if op == 0xD0 && self.z {
+                } else if op == 0xD0 && !self.z {
                     self.pc = self.pc.wrapping_add_signed(val as i8 as i16); //BNE
-                } else if op == 0xF0 && !self.z {
+                } else if op == 0xF0 && self.z {
                     self.pc = self.pc.wrapping_add_signed(val as i8 as i16); //BEQ
                 }
             } //0x14 is covered by earlier cases (NOP, STY, LDY)
@@ -377,11 +395,175 @@ impl Cpu {
     }
 
     fn handle_rmw_instr(&mut self, op: u8) {
+        let (read, write) = Cpu::opcode_needs_read_write(op);
 
+        let mut val: u8 = 0; //it should never actually get used with this, safeguard
+        if read {
+            match op & 0x1F {
+                0x02 => {
+                    val = self.read_immediate();
+                },
+                0x06 => {
+                    val = self.read_zero_page();
+                },
+                0x0E => {
+                    val = self.read_absolute();
+                },
+                0x16 => {
+                    if op == 0x96 || op == 0xB6 {
+                        val = self.read_zero_page_y();
+                    } else {
+                        val = self.read_zero_page_x();
+                    }
+                },
+                0x1E => {
+                    if op == 0x9E || op == 0xBE {
+                        val = self.read_absolute_y();
+                    } else {
+                        val = self.read_absolute_x();
+                    }
+                },
+                _ => unreachable!("impossible value range somehow")
+            }
+        }
+
+        match op & 0x1F { //just to catch STPs
+            0x02 => {
+                if op & 0xE0 <= 0x60 { //STP
+                    self.halted = true;
+                    return;
+                }
+            },
+            0x12 => { //STP
+                self.halted = true;
+                return;
+            }
+            _ => (),
+        }
+
+        match op & 0xE0 { //actual implementations
+            0x00 => { //ASL
+                if op & 0x1F == 0x0A { //accum version
+                    val = self.a;
+                }
+                self.c = val == 0x80;
+                val <<= 1;
+                self.z = val == 0;
+                self.n = val & 0x80 == 0x80;
+                if op & 0x1F == 0x0A { //accum version
+                    self.a = val;
+                }
+            },
+            0x20 => { //ROL
+                if op & 0x1F == 0x0A {
+                    val = self.a;
+                }
+                let to_c = val & 0x80 == 0x80;
+                val <<= 1;
+                val |= self.c as u8;
+                self.c = to_c;
+                if op & 0x1F == 0x0A {
+                    self.a = val;
+                }
+            },
+            0x40 => { //LSR
+                if op & 0x1F == 0x0A {
+                    val = self.a;
+                }
+                self.c = val & 0x01 == 0x01;
+                val >>= 1;
+                self.z = val == 0;
+                self.n = false; //lol
+                if op & 0x1F == 0x0A {
+                    self.a = val;
+                }
+            },
+            0x60 => { //ROR
+                if op & 0x1F == 0x0A {
+                    val = self.a;
+                }
+                let to_c = val & 0x01 == 0x01;
+                val >>= 1;
+                val |= (self.c as u8) << 7;
+                self.c = to_c;
+                self.z = val == 0;
+                self.n = val & 0x80 == 0x80;
+                if op & 0x1F == 0x0A {
+                    self.a = val;
+                }
+            },
+            0x80 => {
+                if op & 0x1F == 0x06 || op & 0x1F == 0x0E || op & 0x1F == 0x16 { //STX
+                    val = self.x;
+                } else if op & 0x1F == 0x0A { //TXA
+                    self.a = self.x;
+                    self.z = self.a == 0;
+                    self.n = self.a & 0x80 == 0x80;
+                } else if op & 0x1F == 0x1A { //TXS
+                    self.s = self.x;
+                } else if op & 0x1F == 0x1E {
+                    todo!("SHX hit!")
+                }
+            },
+            0xA0 => {
+                if op & 0x1F == 0x02 || op & 0x1F == 0x06 || op & 0x1F == 0x0E || op & 0x1F == 0x16 || op & 0x1F == 0x1E { //LDX
+                    self.x = val;
+                    self.z = self.x == 0;
+                    self.n = self.x & 0x80 == 0x80;
+                } else if op & 0x1F == 0x0A { //TAX
+                    self.x = self.a;
+                    self.z = self.x == 0;
+                    self.n = self.x & 0x80 == 0x80;
+                } else if op & 0x1F == 0x1A { //TSX
+                    self.x = self.s;
+                    self.z = self.x == 0;
+                    self.n = self.x & 0x80 == 0x80;
+                }
+            },
+            0xC0 => { //DEC, DEX
+                if op & 0x1F == 0x0A { //X instead of A lol
+                    val = self.x;
+                }
+                val = val.wrapping_sub(1);
+                self.z = val == 0;
+                self.n = val & 0x80 == 0x80;
+                if op & 0x1F == 0x0A {
+                    self.x = val;
+                }
+            },
+            0xE0 => { //INC
+                //No accum version
+                val = val.wrapping_add(1);
+                self.z = val == 0;
+                self.n = val & 0x80 == 0x80;
+            }
+            _ => unreachable!("impossible value range somehow")
+        }
+
+        if write {
+            match op & 0x1F {
+                0x02 => {
+                    self.write_immediate(val);
+                },
+                0x06 => {
+                    self.write_zero_page(val);
+                },
+                0x0E => {
+                    self.write_absolute(val);
+                },
+                0x16 => {
+                    self.write_zero_page_x(val);
+                },
+                0x1E => {
+                    self.write_absolute_x(val);
+                },
+                _ => unreachable!("impossible value range somehow")
+            }
+        }
     }
 
     fn handle_rmw_alu_instr(&mut self, op: u8) {
-
+        todo!("RMW ALU combined instructions hit!")
     }
 
     fn opcode_needs_read_write(op: u8) -> (bool, bool) { //read, write
@@ -399,37 +581,53 @@ impl Cpu {
                         return (true, false); //notably, this ends up not covering earlier exceptions
                     }
                     0x00 => {
-                        if (op & 0x0E >= 0x80) || (op & 0x0E == 0x20) { //bunch of loads and a JSR
+                        if (op & 0xE0 >= 0x80) || (op & 0xE0 == 0x20) { //bunch of loads and a JSR
                             return (true, false);
                         }
                         return (false, false);
                     }
-                    _ => unreachable!("impossible value range somehow")
+                    _ => (),
                 }
             },
             0x01 | 0x05 | 0x09 | 0x0D | 0x11 | 0x15 | 0x19 | 0x1D => { //alu instructions
-                match op & 0x1F {
+                match op & 0xE0 {
                     0x00 | 0x20 | 0x40 | 0x60 | 0xA0 | 0xC0 | 0xE0 => { //the rest, which all read
                         return (true, false);
                     },
                     0x80 => { //STA
                         return (false, true);
                     },
-                    _ => unreachable!("impossible value range somehow")
+                    _ => (),
                 }
             },
             0x02 | 0x06 | 0x0A | 0x0E | 0x12 | 0x16 | 0x1A | 0x1E => { //rmw instructions
-                match op & 0x1F {
-                    0x06 | 0x0E | 0x16 | 0x1E => {
-                        return (true, false);
-                    }
-                    0x02 => {
-                        if (op & 0x0E >= 0x80) || (op & 0x0E == 0x20) { //bunch of loads and a JSR
-                            return (true, false);
+                match op & 0xE0 {
+                    0x00 | 0x20 | 0x40 | 0x60 => { //ASL, ROL, LSR, ROR
+                        if op & 0x1F != 0x02 && op & 0x1F != 0x0A && op & 0x1F != 0x12 && op & 0x1F != 0x1A {
+                            return (true, true);
                         }
                         return (false, false);
-                    }
-                    _ => unreachable!("impossible value range somehow")
+                    },
+                    _ => (),
+                }
+                match op & 0x1F {
+                    0x02 => {
+                        if op & 0xE0 >= 0x80 {
+                            return (true, false); //LDX and NOPs
+                        }
+                        return (false, false);
+                    },
+                    0x06 | 0x0E | 0x16 | 0x1E => {
+                        if op & 0xE0 == 0x80 {
+                            return (false, true); //STX
+                        } else if op & 0xE0 == 0xA0 {
+                            return (true, false); //LDX
+                        } else if op & 0xE0 >= 0xC0 {
+                            return (true, true); //DEC, INC
+                        }
+                        return (false, false)
+                    },
+                    _ => (),
                 }
             },
             0x03 | 0x07 | 0x0B | 0x0F | 0x13 | 0x17 | 0x1B | 0x1F => { //rmw alu instructions
@@ -457,8 +655,8 @@ impl Cpu {
     }
 
     fn pop_stack(&mut self) -> u8 {
-        let addr = 0x0100u16 + self.s as u16;
         self.s = self.s.wrapping_add(1);
+        let addr = 0x0100u16 + self.s as u16;
         return self.bus.borrow_mut().read(addr);
     }
 
@@ -474,8 +672,8 @@ impl Cpu {
     }
 
     fn pop_stack_16(&mut self) -> u16 {
-        let low = self.pop_stack() as u16;
         let high = self.pop_stack() as u16;
+        let low = self.pop_stack() as u16;
         return (high << 8) | low;
     }
 
@@ -491,6 +689,7 @@ impl Cpu {
     }
 
     fn get_x_indirect_addr(&mut self) -> u16 {
+        self.cycles = 6;
         let zp = self.read(self.pc).wrapping_add(self.x);
         return self.bus.borrow_mut().read_16(zp as u16);
     }
@@ -506,6 +705,7 @@ impl Cpu {
     }
 
     fn get_indirect_y_addr(&mut self) -> u16 {
+        self.cycles = 5; //todo: get the actual timing depending on page crossings and such
         let zp = self.read(self.pc);
         return self.bus.borrow_mut().read_16(zp as u16).wrapping_add(self.y as u16);
     }
@@ -523,15 +723,18 @@ impl Cpu {
     //notably, immediate mode does not get a get since it's not fetching an address
 
     fn read_immediate(&mut self) -> u8 {
+        self.cycles = 2;
         return self.read(self.pc);
     }
 
     fn write_immediate(&mut self, val: u8) {
+        self.cycles = 2;
         self.pc += 1;
         //that's it, just the increment
     }
 
     fn get_zero_page_addr(&mut self) -> u16 {
+        self.cycles = 3; //todo RMWs take 5 not 6, need to subtract 1 later
         return self.read(self.pc) as u16;
     }
 
@@ -546,6 +749,7 @@ impl Cpu {
     }
 
     fn get_zero_page_x_addr(&mut self) -> u16 {
+        self.cycles = 4; //todo RMWs take 6 not 8, need to subtract 2 later
         return self.read(self.pc).wrapping_add(self.x) as u16;
     }
 
@@ -560,6 +764,7 @@ impl Cpu {
     }
 
     fn get_zero_page_y_addr(&mut self) -> u16 {
+        self.cycles = 4;
         return self.read(self.pc).wrapping_add(self.y) as u16;
     }
 
@@ -574,6 +779,7 @@ impl Cpu {
     }
 
     fn get_absolute_addr(&mut self) -> u16 {
+        self.cycles = 4; //todo: RMWs take 6 not 8, need to subtract 2 later
         return self.read_16(self.pc);
     }
 
@@ -588,6 +794,8 @@ impl Cpu {
     }
 
     fn get_absolute_x_addr(&mut self) -> u16 {
+        self.cycles = 4; //todo: determine page crossing stuff
+        //todo: RMWs take exactly 7 always, need to mess around with subtracting 1 and page crossing to ensure correct timing
         return self.read_16(self.pc).wrapping_add(self.x as u16);
     }
 
@@ -602,6 +810,7 @@ impl Cpu {
     }
 
     fn get_absolute_y_addr(&mut self) -> u16 {
+        self.cycles = 4; //todo: determine page crossing stuff, and whatever is up with STA on this and abs x
         return self.read_16(self.pc).wrapping_add(self.y as u16);
     }
 

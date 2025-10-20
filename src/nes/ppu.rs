@@ -19,4 +19,8 @@ impl Ppu {
     pub fn reset(&mut self) {
         //todo: yeah
     }
+
+    pub fn step(&mut self) {
+        //todo: yeah
+    }
 }
