@@ -36,7 +36,7 @@ impl Cpu {
             y: 0,
             a: 0,
 
-            s: 0xFF, //todo: not correct but works for now given the reset is called (should be 0xFD at power cause 0xFF - 3)
+            s: 0x00, //todo: not correct but works for now given the reset is called (should be 0xFD at power cause 0x00 - 3)
 
             c: false,
             z: false,
@@ -155,6 +155,10 @@ impl Cpu {
                 self.z = self.y == 0;
                 self.n = self.y & 0x80 == 0x80;
             },
+            0x84 | 0x94 | 0x8C => { //STY
+                matched = true;
+                val = self.y;
+            }
             0xC0 | 0xC4 | 0xCC => { //CPY
                 matched = true;
                 let result = self.y - val;
@@ -172,8 +176,8 @@ impl Cpu {
             0x24 | 0x2C => { //BIT
                 let result = self.a & val;
                 self.z = result == 0;
-                self.v = result & 0x40 == 0x40;
-                self.n = result & 0x80 == 0x80;
+                self.v = val & 0x40 == 0x40; //these use the value from mem for whatever reason?
+                self.n = val & 0x80 == 0x80;
             },
             _ => (),
         }
@@ -182,7 +186,8 @@ impl Cpu {
                 if op == 0x00 { //BRK
                     self.push_stack_16(self.pc.wrapping_add(1)); //it's weird but BRK does just fully skip a byte
                     self.push_stack_flags();
-                    self.pc = 0xFFFE;
+                    self.i = true;
+                    self.pc = self.bus.borrow_mut().read_16(0xFFFE);
                 } else if op == 0x20 { //JSR
                     self.push_stack_16(self.pc.wrapping_sub(1)); //notably, JSR points to one before the next instruction, conflicting with our method of reading operands first
                     self.pc = val_16;
@@ -241,7 +246,7 @@ impl Cpu {
                 }
             } //0x14 is covered by earlier cases (NOP, STY, LDY)
             else if op & 0x1F == 0x18 {
-                let shifted = (op & 0x0E) >> 4;
+                let shifted = (op & 0xE0) >> 4;
                 if shifted <= 0x2 {
                     self.c = ((shifted >> 1) & 0b1) == 1; //CLC and SEC
                 } else if shifted <= 0x6 {
@@ -398,33 +403,66 @@ impl Cpu {
         let (read, write) = Cpu::opcode_needs_read_write(op);
 
         let mut val: u8 = 0; //it should never actually get used with this, safeguard
+        let mut addr: u16 = 0;
         if read {
             match op & 0x1F {
                 0x02 => {
-                    val = self.read_immediate();
+                    if !write {
+                        val = self.read_immediate();
+                    } else {
+                        addr = 0; //idk what to put here
+                        val = self.read_immediate();
+                    }
                 },
                 0x06 => {
-                    val = self.read_zero_page();
+                    if !write {
+                        val = self.read_zero_page();
+                    } else {
+                        addr = self.get_zero_page_addr();
+                    }
                 },
                 0x0E => {
-                    val = self.read_absolute();
+                    if !write {
+                        val = self.read_absolute();
+                    } else {
+                        addr = self.get_absolute_addr();
+                    }
                 },
                 0x16 => {
                     if op == 0x96 || op == 0xB6 {
-                        val = self.read_zero_page_y();
+                        if !write {
+                            val = self.read_zero_page_y();
+                        } else {
+                            addr = self.get_zero_page_y_addr();
+                        }
                     } else {
-                        val = self.read_zero_page_x();
+                        if !write {
+                            val = self.read_zero_page_x();
+                        } else {
+                            addr = self.get_zero_page_x_addr();
+                        }
                     }
                 },
                 0x1E => {
                     if op == 0x9E || op == 0xBE {
-                        val = self.read_absolute_y();
+                        if !write {
+                            val = self.read_absolute_y();
+                        } else {
+                            addr = self.get_absolute_y_addr();
+                        }
                     } else {
-                        val = self.read_absolute_x();
+                        if !write {
+                            val = self.read_absolute_x();
+                        } else {
+                            addr = self.get_absolute_x_addr();
+                        }
                     }
                 },
                 _ => unreachable!("impossible value range somehow")
             }
+        }
+        if read && write {
+            val = self.bus.borrow_mut().read(addr); //load the starting value
         }
 
         match op & 0x1F { //just to catch STPs
@@ -446,7 +484,7 @@ impl Cpu {
                 if op & 0x1F == 0x0A { //accum version
                     val = self.a;
                 }
-                self.c = val == 0x80;
+                self.c = val & 0x80 == 0x80;
                 val <<= 1;
                 self.z = val == 0;
                 self.n = val & 0x80 == 0x80;
@@ -540,7 +578,7 @@ impl Cpu {
             _ => unreachable!("impossible value range somehow")
         }
 
-        if write {
+        if write && !read {
             match op & 0x1F {
                 0x02 => {
                     self.write_immediate(val);
@@ -559,6 +597,8 @@ impl Cpu {
                 },
                 _ => unreachable!("impossible value range somehow")
             }
+        } else if write && read {
+            self.bus.borrow_mut().write(addr, val); //write back to the earlier grabbed value
         }
     }
 
@@ -568,10 +608,10 @@ impl Cpu {
 
     fn opcode_needs_read_write(op: u8) -> (bool, bool) { //read, write
         //https://www.nesdev.org/wiki/CPU_unofficial_opcodes used as reference
-        if op == 0x84 | 0x9C { //control block, STY, SHY
+        if op == 0x84 || op == 0x8C || op == 0x94 || op == 0x9C { //control block, STY, SHY
             return (false, true)
         }
-        if op == 0x8E | 0x96 | 0x9E { //control block, STY, SHY
+        if op == 0x86 || op == 0x8E || op == 0x96 || op == 0x9E { //control block, STX, SHX
             return (false, true)
         }
         match op & 0x1F {
