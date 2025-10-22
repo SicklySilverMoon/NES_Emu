@@ -77,7 +77,7 @@ impl Cpu {
     }
 
     pub fn step(&mut self) -> u8 {
-        self.cycles = 0;
+        self.cycles = 2;
         let op = self.read(self.pc);
 
         match op & 0x1F {
@@ -111,6 +111,7 @@ impl Cpu {
                     }
                     if (op & 0xE0) == 0x20 { //JSR
                         val_16 = self.get_absolute_addr();
+                        self.cycles += 2; //JSR takes 6, adding the extra 2 here
                     }
                 },
                 0x04 => {
@@ -121,6 +122,7 @@ impl Cpu {
                         val_16 = self.read_indirect_16();
                     } else if op == 0x4C { //JMP
                         val_16 = self.get_absolute_addr();
+                        self.cycles -= 1; //JMP absolute takes 3 not 4, but abs addr adds 2 cycles, so sub 1 off
                     } else {
                         val = self.read_absolute();
                     }
@@ -161,14 +163,14 @@ impl Cpu {
             }
             0xC0 | 0xC4 | 0xCC => { //CPY
                 matched = true;
-                let result = self.y - val;
+                let result = self.y.wrapping_sub(val);
                 self.c = self.y >= val;
                 self.z = result == 0;
                 self.n = result & 0x80 == 0x80;
             },
             0xE0 | 0xE4 | 0xEC => { //CPX
                 matched = true;
-                let result = self.x - val;
+                let result = self.x.wrapping_sub(val);
                 self.c = self.x >= val;
                 self.z = result == 0;
                 self.n = result & 0x80 == 0x80;
@@ -463,6 +465,9 @@ impl Cpu {
         }
         if read && write {
             val = self.bus.borrow_mut().read(addr); //load the starting value
+            self.cycles += 2;
+            //todo: we also need to handle indirect page cross dummy reads
+            //todo: and dummy writes
         }
 
         match op & 0x1F { //just to catch STPs
@@ -482,7 +487,7 @@ impl Cpu {
         match op & 0xE0 { //actual implementations
             0x00 => { //ASL
                 if op & 0x1F == 0x0A { //accum version
-                    val = self.a;
+                    val = self.a; //todo: missing cycle counts on accum versions
                 }
                 self.c = val & 0x80 == 0x80;
                 val <<= 1;
@@ -718,6 +723,7 @@ impl Cpu {
     }
 
     fn read_indirect_16(&mut self) -> u16 {
+        self.cycles += 3; //just for indirect JMP
         let low_1 = self.read(self.pc);
         let high_1 = self.read(self.pc.wrapping_add(1));
         let addr_1 = (high_1 as u16) << 8 | low_1 as u16;
@@ -729,7 +735,7 @@ impl Cpu {
     }
 
     fn get_x_indirect_addr(&mut self) -> u16 {
-        self.cycles = 6;
+        self.cycles += 4;
         let zp = self.read(self.pc).wrapping_add(self.x);
         return self.bus.borrow_mut().read_16(zp as u16);
     }
@@ -745,7 +751,8 @@ impl Cpu {
     }
 
     fn get_indirect_y_addr(&mut self) -> u16 {
-        self.cycles = 5; //todo: get the actual timing depending on page crossings and such
+        self.cycles += 3; //todo: get the actual timing depending on page crossings and such
+        //todo: and the dummy read
         let zp = self.read(self.pc);
         return self.bus.borrow_mut().read_16(zp as u16).wrapping_add(self.y as u16);
     }
@@ -763,18 +770,16 @@ impl Cpu {
     //notably, immediate mode does not get a get since it's not fetching an address
 
     fn read_immediate(&mut self) -> u8 {
-        self.cycles = 2;
         return self.read(self.pc);
     }
 
     fn write_immediate(&mut self, val: u8) {
-        self.cycles = 2;
         self.pc += 1;
         //that's it, just the increment
     }
 
     fn get_zero_page_addr(&mut self) -> u16 {
-        self.cycles = 3; //todo RMWs take 5 not 6, need to subtract 1 later
+        self.cycles += 1; //todo RMWs take 5 not 6, need to subtract 1 later
         return self.read(self.pc) as u16;
     }
 
@@ -789,7 +794,7 @@ impl Cpu {
     }
 
     fn get_zero_page_x_addr(&mut self) -> u16 {
-        self.cycles = 4; //todo RMWs take 6 not 8, need to subtract 2 later
+        self.cycles += 2; //todo RMWs take 6 not 8, need to subtract 2 later
         return self.read(self.pc).wrapping_add(self.x) as u16;
     }
 
@@ -804,7 +809,7 @@ impl Cpu {
     }
 
     fn get_zero_page_y_addr(&mut self) -> u16 {
-        self.cycles = 4;
+        self.cycles += 2;
         return self.read(self.pc).wrapping_add(self.y) as u16;
     }
 
@@ -819,7 +824,7 @@ impl Cpu {
     }
 
     fn get_absolute_addr(&mut self) -> u16 {
-        self.cycles = 4; //todo: RMWs take 6 not 8, need to subtract 2 later
+        self.cycles += 2;
         return self.read_16(self.pc);
     }
 
@@ -834,7 +839,7 @@ impl Cpu {
     }
 
     fn get_absolute_x_addr(&mut self) -> u16 {
-        self.cycles = 4; //todo: determine page crossing stuff
+        self.cycles += 2; //todo: determine page crossing stuff
         //todo: RMWs take exactly 7 always, need to mess around with subtracting 1 and page crossing to ensure correct timing
         return self.read_16(self.pc).wrapping_add(self.x as u16);
     }
@@ -850,7 +855,7 @@ impl Cpu {
     }
 
     fn get_absolute_y_addr(&mut self) -> u16 {
-        self.cycles = 4; //todo: determine page crossing stuff, and whatever is up with STA on this and abs x
+        self.cycles += 2; //todo: determine page crossing stuff, and whatever is up with STA on this and abs x
         return self.read_16(self.pc).wrapping_add(self.y as u16);
     }
 
