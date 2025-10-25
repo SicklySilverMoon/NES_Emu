@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::ops::DerefMut;
 use std::rc::Rc;
-
+use sdl3::render::WindowCanvas;
 use crate::nes::bus::Bus;
 use crate::nes::cpu::Cpu;
 use crate::nes::ppu::Ppu;
@@ -40,5 +40,9 @@ impl Nes {
                 ppu.step();
             }
         }
+    }
+
+    pub fn draw_chrrom(&self, canvas: &mut WindowCanvas) { //temp function for testing and drawing CHRROM
+        self.bus.borrow_mut().draw_chrrom(canvas);
     }
 }

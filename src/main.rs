@@ -10,29 +10,23 @@ use std::time::Duration;
 pub fn main() {
     let mut nes = nes::nes::Nes::new();
     nes.reset(); //todo: soon to be unneeded, init states set most up, but reset still loads ROM
-    loop { //temp
-        nes.step();
-    }
+    // while !nes.is_halted() { //temp
+    //     nes.step();
+    // }
 
 
     let sdl_context = sdl3::init().unwrap();
     let video_subsystem = sdl_context.video().unwrap();
 
-    let window = video_subsystem.window("rust-sdl3 demo", 800, 600)
+    let window = video_subsystem.window("NES Emu", 256, 128)
         .position_centered()
         .build()
         .unwrap();
 
     let mut canvas = window.into_canvas();
-
-    canvas.set_draw_color(Color::RGB(0, 255, 255));
-    canvas.clear();
-    canvas.present();
     let mut event_pump = sdl_context.event_pump().unwrap();
-    let mut i = 0;
     'running: loop {
-        i = (i + 1) % 255;
-        canvas.set_draw_color(Color::RGB(i, 64, 255 - i));
+        canvas.set_draw_color(Color::RGB(0, 0, 0));
         canvas.clear();
         for event in event_pump.poll_iter() {
             match event {
@@ -46,9 +40,12 @@ pub fn main() {
                 _ => {}
             }
         }
-        // The rest of the game loop goes here...
+        if !nes.is_halted() {
+            nes.step();
+        }
+        nes.draw_chrrom(&mut canvas);
 
         canvas.present();
-        ::std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
+        std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
     }
 }
