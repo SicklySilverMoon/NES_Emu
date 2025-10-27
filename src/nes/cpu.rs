@@ -5,8 +5,15 @@ use std::unreachable;
 use crate::nes::bus::Bus;
 use crate::nes::nes::Nes;
 
+pub enum CpuReturnAction {
+    None,
+    Read(u16),
+    ReadAddr(u16),
+    Write(u16, u8),
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum CpuStage {
+enum CpuStage {
     FetchIns,
     Decode,
     FetchOp1,
@@ -14,6 +21,22 @@ pub enum CpuStage {
     FetchIndirect,
     Execute,
     WriteBack,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AddrMode {
+    Implied,
+    Immediate,
+    ZeroPage,
+    ZeroPageX,
+    ZeroPageY,
+    Absolute,
+    AbsoluteX,
+    AbsoluteY,
+    Indirect,
+    IndirectX,
+    IndirectY,
+    Accumulator, //That's not even an address mode
 }
 
 pub struct Cpu {
@@ -35,7 +58,9 @@ pub struct Cpu {
     halted: bool, //if the CPU is halted
 
     stage: CpuStage,
-    instruction: u8,
+    instruction: u8, //For storage across cycles/stages
+    operand1: u8, //ditto
+    operand2: u8, //ditto ditto
     cycles: u8, //how many cycles this instruction took
 }
 
@@ -61,6 +86,8 @@ impl Cpu {
 
             stage: CpuStage::FetchIns,
             instruction: 0,
+            operand1: 0,
+            operand2: 0,
             cycles: 0,
         }
     }
@@ -78,22 +105,68 @@ impl Cpu {
         self.stage = CpuStage::FetchIns;
     }
 
-    pub fn step(&mut self, val: Option<u8>) -> Option<u16> { //return an address that the NES must read, or maybe none
+    pub fn step(&mut self, val: Option<u8>) -> CpuReturnAction { //return an address that the NES must read, or an address to write, or nothing
         if self.stage == CpuStage::FetchIns {
             self.stage = CpuStage::Decode;
-            return Some(self.pc);
+            return CpuReturnAction::Read(self.pc);
         } else if self.stage == CpuStage::Decode {
             self.instruction = val.unwrap(); //shouldn't panic
             let (read, write) = Cpu::instruction_needs_read_write(self.instruction);
-            if read {
+            return if read {
                 self.stage = CpuStage::FetchOp1;
+                let ret = CpuReturnAction::Read(self.pc);
+                self.pc = self.pc.wrapping_add(1);
+                return ret;
             } else {
                 self.stage = CpuStage::Execute;
+                CpuReturnAction::None
             }
-            return Some(self.pc);
         } else if self.stage == CpuStage::FetchOp1 {
+            self.operand1 = val.unwrap();
+
+            let mode = Cpu::instruction_read_write_type(self.instruction);
+            return match mode { //todo: some must fetch more, some must go right to execute, pretty easy to determine what's what
+                AddrMode::ZeroPage => {
+                    self.stage = CpuStage::DETERMINE;
+                    CpuReturnAction::Read(self.operand1 as u16)
+                }
+                AddrMode::ZeroPageX => {
+                    self.stage = CpuStage::DETERMINE;
+                    // CpuReturnAction::Read(self.operand1.wrapping_add(self.x) as u16) //todo: nope must be added later
+                }
+                AddrMode::ZeroPageY => {
+                    self.stage = CpuStage::DETERMINE;
+                    // CpuReturnAction::Read(self.operand1.wrapping_add(self.y) as u16) //todo: nope must be added later
+                }
+                AddrMode::Absolute | AddrMode::AbsoluteX | AddrMode::AbsoluteY |
+                AddrMode::Indirect | AddrMode::IndirectX | AddrMode::IndirectY => {
+                    self.stage = CpuStage::FetchOp2;
+                    let ret = CpuReturnAction::Read(self.pc);
+                    self.pc = self.pc.wrapping_add(1);
+                    ret
+                }
+                _ => {
+                    self.stage = CpuStage::Execute;
+                    CpuReturnAction::None
+                }
+            }
+        } else if self.stage == CpuStage::FetchOp2 {
+            self.operand2 = val.unwrap();
+
             let (read, write) = Cpu::instruction_needs_read_write(self.instruction);
-            //todo: some must fetch more, some must go right to execute, determine which, make a function for it as you did instruction_needs_read_write
+            let mode = Cpu::instruction_read_write_type(self.instruction);
+            match mode { //todo: some must fetch more, some must go right to execute, pretty easy to determine what's what
+                AddrMode::ZeroPage => {}
+                AddrMode::ZeroPageX => {}
+                AddrMode::ZeroPageY => {}
+                AddrMode::Absolute => {}
+                AddrMode::AbsoluteX => {}
+                AddrMode::AbsoluteY => {}
+                AddrMode::Indirect => {}
+                AddrMode::IndirectX => {}
+                AddrMode::IndirectY => {}
+                _ => { self.stage = CpuStage::Execute; return CpuReturnAction::None }
+            }
         }
 
         if self.stage == CpuStage::Execute {
@@ -114,50 +187,11 @@ impl Cpu {
             }
         }
         // return self.cycles;
-        return None;
+        return CpuReturnAction::None;
     }
 
     fn handle_control_instr(&mut self, op: u8) {
         let (read, write) = Cpu::instruction_needs_read_write(op);
-
-        let mut val: u8 = 0; //it should never actually get used with this, safeguard
-        let mut val_16: u16 = 0;
-        if read {
-            match op & 0x1F {
-                0x00 => {
-                    if (op & 0xE0) >= 0x80 { //NOP, LDY, CPY, CPX
-                        val = self.read_immediate();
-                    }
-                    if (op & 0xE0) == 0x20 { //JSR
-                        val_16 = self.get_absolute_addr();
-                        self.cycles += 2; //JSR takes 6, adding the extra 2 here
-                    }
-                },
-                0x04 => {
-                    val = self.read_zero_page();
-                },
-                0x0C => {
-                    if op == 0x6C { //JMP
-                        val_16 = self.read_indirect_16();
-                    } else if op == 0x4C { //JMP
-                        val_16 = self.get_absolute_addr();
-                        self.cycles -= 1; //JMP absolute takes 3 not 4, but abs addr adds 2 cycles, so sub 1 off
-                    } else {
-                        val = self.read_absolute();
-                    }
-                },
-                0x10 => {
-                    val = self.read_immediate(); //gonna have to transform these to a signed value for most branches
-                },
-                0x14 => {
-                    val = self.read_zero_page_x();
-                },
-                0x1C => {
-                    val = self.read_absolute_x();
-                },
-                _ => unreachable!("impossible value range somehow")
-            }
-        }
 
         let mut matched = false;
         match op {
@@ -285,59 +319,10 @@ impl Cpu {
                 todo!("SHY executed!") //SHY, lol
             }
         }
-
-        if write {
-            match op & 0x1F {
-                0x04 => {
-                    self.write_zero_page(val);
-                },
-                0x0C => {
-                    self.write_absolute(val);
-                },
-                0x14 => {
-                    self.write_zero_page_x(val);
-                },
-                0x1C => {
-                    self.write_absolute_x(val);
-                },
-                _ => unreachable!("impossible value range somehow")
-            }
-        }
     }
 
     fn handle_alu_instr(&mut self, op: u8) {
         let (read, write) = Cpu::instruction_needs_read_write(op);
-
-        let mut val: u8 = 0; //it should never actually get used with this, safeguard
-        if read {
-            match op & 0x1F {
-                0x01 => {
-                    val = self.read_x_indirect();
-                },
-                0x05 => {
-                    val = self.read_zero_page();
-                },
-                0x09 => {
-                    val = self.read_immediate();
-                },
-                0x0D => {
-                    val = self.read_absolute();
-                },
-                0x11 => {
-                    val = self.read_indirect_y();
-                },
-                0x15 => {
-                    val = self.read_zero_page_x();
-                },
-                0x19 => {
-                    val = self.read_absolute_y();
-                },
-                0x1D => {
-                    val = self.read_absolute_x();
-                },
-                _ => unreachable!("impossible value range somehow")
-            }
-        }
 
         match op & 0xE0 { //actual implementations
             0x00 => { //ORA
@@ -388,100 +373,11 @@ impl Cpu {
             }
             _ => unreachable!("impossible value range somehow")
         }
-
-        if write {
-            match op & 0x1F {
-                0x01 => {
-                    self.write_x_indirect(val);
-                },
-                0x05 => {
-                    self.write_zero_page(val);
-                },
-                0x09 => {
-                    self.write_immediate(val);
-                },
-                0x0D => {
-                    self.write_absolute(val);
-                },
-                0x11 => {
-                    self.write_indirect_y(val);
-                },
-                0x15 => {
-                    self.write_zero_page_x(val);
-                },
-                0x19 => {
-                    self.write_absolute_y(val);
-                },
-                0x1D => {
-                    self.write_absolute_x(val);
-                },
-                _ => unreachable!("impossible value range somehow")
-            }
-        }
     }
 
     fn handle_rmw_instr(&mut self, op: u8) {
         let (read, write) = Cpu::instruction_needs_read_write(op);
 
-        let mut val: u8 = 0; //it should never actually get used with this, safeguard
-        let mut addr: u16 = 0;
-        if read {
-            match op & 0x1F {
-                0x02 => {
-                    if !write {
-                        val = self.read_immediate();
-                    } else {
-                        addr = 0; //idk what to put here
-                        val = self.read_immediate();
-                    }
-                },
-                0x06 => {
-                    if !write {
-                        val = self.read_zero_page();
-                    } else {
-                        addr = self.get_zero_page_addr();
-                    }
-                },
-                0x0E => {
-                    if !write {
-                        val = self.read_absolute();
-                    } else {
-                        addr = self.get_absolute_addr();
-                    }
-                },
-                0x16 => {
-                    if op == 0x96 || op == 0xB6 {
-                        if !write {
-                            val = self.read_zero_page_y();
-                        } else {
-                            addr = self.get_zero_page_y_addr();
-                        }
-                    } else {
-                        if !write {
-                            val = self.read_zero_page_x();
-                        } else {
-                            addr = self.get_zero_page_x_addr();
-                        }
-                    }
-                },
-                0x1E => {
-                    if op == 0x9E || op == 0xBE {
-                        if !write {
-                            val = self.read_absolute_y();
-                        } else {
-                            addr = self.get_absolute_y_addr();
-                        }
-                    } else {
-                        if !write {
-                            val = self.read_absolute_x();
-                        } else {
-                            addr = self.get_absolute_x_addr();
-                        }
-                    }
-                },
-                _ => unreachable!("impossible value range somehow")
-            }
-        }
         if read && write {
             val = self.bus.borrow_mut().read(addr); //load the starting value
             self.cycles += 2;
@@ -700,6 +596,134 @@ impl Cpu {
             _ => unreachable!("impossible value range somehow")
         }
         return (false, false);
+    }
+
+    fn instruction_read_write_type(instr: u8) -> AddrMode {
+        let (read, write) = Cpu::instruction_needs_read_write(instr);
+
+        match instr & 0x1F {
+            0x00 | 0x04 | 0x08 | 0x0C | 0x10 | 0x14 | 0x18 | 0x1C => { //control instructions
+                if read {
+                    match instr & 0x1F {
+                        0x00 => {
+                            if (instr & 0xE0) >= 0x80 { //NOP, LDY, CPY, CPX
+                                return AddrMode::Immediate;
+                            }
+                            if (instr & 0xE0) == 0x20 { //JSR
+                                return AddrMode::Immediate;
+                                // val_16 = self.get_absolute_addr();
+                                // self.cycles += 2; //JSR takes 6, adding the extra 2 here
+                            }
+                        },
+                        0x04 => {
+                            return AddrMode::ZeroPage;
+                        },
+                        0x0C => {
+                            if instr == 0x6C { //JMP
+                                return AddrMode::Indirect;
+                                // val_16 = self.read_indirect_16();
+                            } else if instr == 0x4C { //JMP
+                                return AddrMode::Absolute;
+                                // val_16 = self.get_absolute_addr();
+                                // self.cycles -= 1; //JMP absolute takes 3 not 4, but abs addr adds 2 cycles, so sub 1 off
+                            } else {
+                                return AddrMode::Absolute;
+                            }
+                        },
+                        0x10 => {
+                            return AddrMode::Immediate; //gonna have to transform these to a signed value for most branches
+                        },
+                        0x14 => {
+                            return AddrMode::ZeroPageX;
+                        },
+                        0x1C => {
+                            return AddrMode::AbsoluteX;
+                        },
+                        _ => unreachable!("impossible value range somehow")
+                    }
+                } else if write {
+                    match instr & 0x1F {
+                        0x04 => {
+                            return AddrMode::ZeroPage;
+                        },
+                        0x0C => {
+                            return AddrMode::Absolute;
+                        },
+                        0x14 => {
+                            return AddrMode::ZeroPageX;
+                        },
+                        0x1C => {
+                            return AddrMode::AbsoluteX;
+                        },
+                        _ => unreachable!("impossible value range somehow")
+                    }
+                }
+            },
+            0x01 | 0x05 | 0x09 | 0x0D | 0x11 | 0x15 | 0x19 | 0x1D => { //ALU instructions
+                if read || write {
+                    match instr & 0x1F {
+                        0x01 => {
+                            return AddrMode::IndirectX;
+                        },
+                        0x05 => {
+                            return AddrMode::ZeroPage;
+                        },
+                        0x09 => {
+                            return AddrMode::Immediate;
+                        },
+                        0x0D => {
+                            return AddrMode::Absolute;
+                        },
+                        0x11 => {
+                            return AddrMode::IndirectY;
+                        },
+                        0x15 => {
+                            return AddrMode::ZeroPageX;
+                        },
+                        0x19 => {
+                            return AddrMode::AbsoluteY;
+                        },
+                        0x1D => {
+                            return AddrMode::AbsoluteX;
+                        },
+                        _ => unreachable!("impossible value range somehow")
+                    }
+                }
+            },
+            0x02 | 0x06 | 0x0A | 0x0E | 0x12 | 0x16 | 0x1A | 0x1E => { //RMW instructions
+                return match instr & 0x1F {
+                    0x02 => {
+                        AddrMode::Immediate
+                    },
+                    0x06 => {
+                        AddrMode::ZeroPage
+                    },
+                    0x0E => {
+                        AddrMode::Absolute
+                    },
+                    0x16 => {
+                        if instr == 0x96 || instr == 0xB6 {
+                            AddrMode::ZeroPageY
+                        } else {
+                            AddrMode::ZeroPageX
+                        }
+                    },
+                    0x1E => {
+                        if instr == 0x9E || instr == 0xBE {
+                            AddrMode::AbsoluteY
+                        } else {
+                            AddrMode::AbsoluteX
+                        }
+                    },
+                    _ => unreachable!("impossible value range somehow")
+                }
+            },
+            0x03 | 0x07 | 0x0B | 0x0F | 0x13 | 0x17 | 0x1B | 0x1F => { //RMW ALU instructions
+                todo!()
+            },
+            _ => unreachable!("impossible value range somehow")
+        }
+        return AddrMode::Implied;
     }
 
     fn push_stack(&mut self, val: u8) {
