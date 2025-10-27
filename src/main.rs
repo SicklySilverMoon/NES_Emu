@@ -2,14 +2,15 @@ mod nes;
 
 extern crate sdl3;
 
+use std::{env, fs};
 use sdl3::pixels::Color;
 use sdl3::event::Event;
 use sdl3::keyboard::Keycode;
 use std::time::Duration;
 
 pub fn main() {
-    let mut nes = nes::nes::Nes::new();
-    nes.reset(); //todo: soon to be unneeded, init states set most up, but reset still loads ROM
+    let mut nes = nes::nes::Nes::new(fs::read(env::args().nth(1).unwrap()).unwrap());
+    //nes.reset() is no longer needed, the reset is done in the NES constructor
     // while !nes.is_halted() { //temp
     //     nes.step();
     // }

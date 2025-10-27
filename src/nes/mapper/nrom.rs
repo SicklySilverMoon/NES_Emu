@@ -6,7 +6,7 @@ enum NromType {
     NROM256,
 }
 
-struct NROM {
+pub struct NROM {
     nrom_type: NromType,
     has_chr_ram: bool,
     prg_rom_first: [u8; 0x4000],
@@ -23,13 +23,12 @@ impl NROM {
         } else {
             nromtype = NromType::NROM256;
         }
+        let mut prg_rom = prg_rom.clone();
+        prg_rom.resize(0x8000, 0);
         let splits = prg_rom.split_at(0x4000);
         let first: [u8; 0x4000] = splits.0.try_into().unwrap();
-        let second: [u8; 0x4000] = match nromtype {
-            NromType::NROM128 => { [0; 0x4000] }
-            NromType::NROM256 => { splits.1.try_into().unwrap() }
-        };
-        NROM {
+        let second: [u8; 0x4000] = splits.1.try_into().unwrap(); //either it's 0 as it was resized up to 0x8000, or it's the PRG-ROM cropped
+        return NROM {
             nrom_type: nromtype,
             has_chr_ram: header[5] == 0,
             prg_rom_first: first,
