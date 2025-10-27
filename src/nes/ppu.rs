@@ -3,8 +3,6 @@ use std::rc::Rc;
 use crate::nes::bus::Bus;
 
 pub struct Ppu {
-    bus: Rc<RefCell<Bus>>,
-
     //internal registers
     w: bool, //w register/write latch
     t: u16, //t register/transfer address
@@ -13,18 +11,13 @@ pub struct Ppu {
 }
 
 impl Ppu {
-    pub fn new(bus: Rc<RefCell<Bus>>) -> Rc<RefCell<Ppu>> {
-        let ppu = Ppu {
-            bus,
-
+    pub fn new() -> Ppu {
+        return Ppu {
             w: false,
             t: 0,
             v: 0,
             v_temp: 0,
-        };
-        let ppu = Rc::new(RefCell::new(ppu));
-        ppu.borrow_mut().bus.borrow_mut().set_ppu(Rc::downgrade(&ppu));
-        return ppu;
+        }
     }
 
     pub fn reset(&mut self) {
@@ -65,7 +58,7 @@ impl Ppu {
                 if !self.w {
                     self.v_temp = ((data & 0x3F) as u16) << 8;
                 } else {
-                    self.v = self.v_temp | (data as u16);
+                    self.v = (self.v_temp | (data as u16)) & 0x3FFF; //PPU space is 14 bits
                 }
                 self.w = !self.w;
             },

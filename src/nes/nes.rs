@@ -3,16 +3,15 @@ use std::ops::DerefMut;
 use std::rc::Rc;
 use sdl3::render::WindowCanvas;
 use crate::nes::bus::Bus;
-use crate::nes::cpu::Cpu;
+use crate::nes::cpu;
+use cpu::{Cpu, CpuStage};
 use crate::nes::mapper::mapper;
 use mapper::Mapper;
 use crate::nes::ppu::Ppu;
 
 pub struct Nes {
-    cpu: Rc<RefCell<Cpu>>,
-    ppu: Rc<RefCell<Ppu>>,
-    bus: Rc<RefCell<Bus>>,
-
+    cpu: Cpu,
+    ppu: Ppu,
     mapper: Box<dyn Mapper>,
 }
 
@@ -28,38 +27,43 @@ impl Nes {
         let chrrom = splits.1.to_vec(); //there could be something about a footer here that could mess something up in future
         // chrrom.resize(chrrom_size, 0);
 
-        let bus = Rc::new(RefCell::new(Bus::new()));
         let mut nes = Nes {
-            bus: bus.clone(),
-            cpu: Cpu::new(bus.clone()),
-            ppu: Ppu::new(bus.clone()),
             mapper: mapper::create_mapper(&header, &rom, &chrrom),
+            cpu: Cpu::new(),
+            ppu: Ppu::new(),
         };
         nes.reset();
         return nes;
     }
 
     pub fn is_halted(&self) -> bool {
-        self.cpu.borrow().is_halted()
+        self.cpu.is_halted()
     }
 
     pub fn reset(&mut self) {
-        self.bus.borrow_mut().reset();
-        self.cpu.borrow_mut().reset();
-        self.ppu.borrow_mut().reset();
+        // self.bus.borrow_mut().reset();
+        let reset_vector = self.mapper.read_cpu(0xFFFC) as u16 | (self.mapper.read_cpu(0xFFFD) << 8) as u16;
+        self.cpu.reset(reset_vector);
+        self.ppu.reset();
+    }
+
+    pub fn read_cpu(&mut self, addr: u16) -> u8 {
+        return self.mapper.read_cpu(addr);
     }
 
     pub fn step(&mut self) {
-        if !self.is_halted() {
-            let cpu_cycles = self.cpu.borrow_mut().step();
-            let mut ppu = self.ppu.borrow_mut();
-            for _ in 0..(cpu_cycles * 3) {
-                ppu.step();
-            }
-        }
+        let closure = self.cpu.step();
+
+
+        // if !self.is_halted() {
+        //     let cpu_cycles = self.cpu.step();
+        //     for _ in 0..(cpu_cycles * 3) {
+        //         self.ppu.step();
+        //     }
+        // }
     }
 
     pub fn draw_chrrom(&self, canvas: &mut WindowCanvas) { //temp function for testing and drawing CHRROM
-        self.bus.borrow_mut().draw_chrrom(canvas);
+        // self.bus.borrow_mut().draw_chrrom(canvas);
     }
 }
