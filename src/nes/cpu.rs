@@ -5,22 +5,24 @@ use std::unreachable;
 use crate::nes::bus::Bus;
 use crate::nes::nes::Nes;
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CpuReturnAction {
     None,
     Read(u16),
-    ReadAddr(u16),
     Write(u16, u8),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum CpuStage {
     FetchIns,
     Decode,
     FetchOp1,
     FetchOp2,
-    FetchIndirect,
+    FetchAddrAdjust,
+    FetchAddrAdjust2,
     Execute,
-    WriteBack,
+    WriteBack1,
+    WriteBack2,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -112,11 +114,11 @@ impl Cpu {
         } else if self.stage == CpuStage::Decode {
             self.instruction = val.unwrap(); //shouldn't panic
             let (read, write) = Cpu::instruction_needs_read_write(self.instruction);
-            return if read {
+            return if read || write {
                 self.stage = CpuStage::FetchOp1;
                 let ret = CpuReturnAction::Read(self.pc);
                 self.pc = self.pc.wrapping_add(1);
-                return ret;
+                ret
             } else {
                 self.stage = CpuStage::Execute;
                 CpuReturnAction::None
@@ -125,18 +127,14 @@ impl Cpu {
             self.operand1 = val.unwrap();
 
             let mode = Cpu::instruction_read_write_type(self.instruction);
-            return match mode { //todo: some must fetch more, some must go right to execute, pretty easy to determine what's what
+            return match mode { //todo: start splitting on read and writes, as some stuff just reads, some stuff just needs ops for writes, and some weird ones (indexed stuff) do both
                 AddrMode::ZeroPage => {
-                    self.stage = CpuStage::DETERMINE;
+                    self.stage = CpuStage::Execute;
                     CpuReturnAction::Read(self.operand1 as u16)
                 }
-                AddrMode::ZeroPageX => {
-                    self.stage = CpuStage::DETERMINE;
-                    // CpuReturnAction::Read(self.operand1.wrapping_add(self.x) as u16) //todo: nope must be added later
-                }
-                AddrMode::ZeroPageY => {
-                    self.stage = CpuStage::DETERMINE;
-                    // CpuReturnAction::Read(self.operand1.wrapping_add(self.y) as u16) //todo: nope must be added later
+                AddrMode::ZeroPageX | AddrMode::ZeroPageY => {
+                    self.stage = CpuStage::FetchAddrAdjust;
+                    CpuReturnAction::Read(self.operand1 as u16)
                 }
                 AddrMode::Absolute | AddrMode::AbsoluteX | AddrMode::AbsoluteY |
                 AddrMode::Indirect | AddrMode::IndirectX | AddrMode::IndirectY => {
@@ -146,6 +144,7 @@ impl Cpu {
                     ret
                 }
                 _ => {
+                    println!("Fallthrough on FetchOp1 with {:?}", self.stage);
                     self.stage = CpuStage::Execute;
                     CpuReturnAction::None
                 }
@@ -156,16 +155,73 @@ impl Cpu {
             let (read, write) = Cpu::instruction_needs_read_write(self.instruction);
             let mode = Cpu::instruction_read_write_type(self.instruction);
             match mode { //todo: some must fetch more, some must go right to execute, pretty easy to determine what's what
-                AddrMode::ZeroPage => {}
-                AddrMode::ZeroPageX => {}
-                AddrMode::ZeroPageY => {}
-                AddrMode::Absolute => {}
-                AddrMode::AbsoluteX => {}
-                AddrMode::AbsoluteY => {}
+                AddrMode::Absolute => {
+                    let ret = CpuReturnAction::Read((self.operand1 as u16) | ((self.operand2 as u16) << 8));
+                    self.stage = CpuStage::Execute;
+                    return ret
+                }
+                AddrMode::AbsoluteX | AddrMode::AbsoluteY => {
+                    let ret = CpuReturnAction::Read((self.operand1 as u16) | ((self.operand2 as u16) << 8));
+                    self.stage = CpuStage::Execute;
+                    return ret
+                }
                 AddrMode::Indirect => {}
                 AddrMode::IndirectX => {}
                 AddrMode::IndirectY => {}
-                _ => { self.stage = CpuStage::Execute; return CpuReturnAction::None }
+                _ => { println!("Fallthrough on FetchOp2 with {:?}", self.stage); self.stage = CpuStage::Execute; return CpuReturnAction::None }
+            }
+        } else if self.stage == CpuStage::FetchAddrAdjust {
+            //do nothing with the value, it's a dummy read
+            let (read, write) = Cpu::instruction_needs_read_write(self.instruction);
+            let mode = Cpu::instruction_read_write_type(self.instruction);
+            match mode {
+                AddrMode::ZeroPageX => {
+                    self.operand1 = self.operand1.wrapping_add(self.x);
+                    self.stage = CpuStage::Execute;
+                    return CpuReturnAction::Read(self.operand1 as u16);
+                }
+                AddrMode::ZeroPageY => {
+                    self.operand1 = self.operand1.wrapping_add(self.y);
+                    self.stage = CpuStage::Execute;
+                    return CpuReturnAction::Read(self.operand1 as u16);
+                }
+                AddrMode::AbsoluteX => {
+                    let (op1, wrapped) = self.operand1.overflowing_add(self.x);
+                    let ret = CpuReturnAction::Read((op1 as u16) | ((self.operand2 as u16) << 8));
+                    if wrapped || (read && write) {
+                        self.stage = CpuStage::FetchAddrAdjust2;
+                    } else {
+                        self.stage = CpuStage::Execute;
+                    }
+                    return ret;
+                }
+                AddrMode::AbsoluteY => {
+                    let (op1, wrapped) = self.operand1.overflowing_add(self.x);
+                    let ret = CpuReturnAction::Read((op1 as u16) | ((self.operand2 as u16) << 8));
+                    if wrapped || (read && write) {
+                        self.stage = CpuStage::FetchAddrAdjust2;
+                    } else {
+                        self.stage = CpuStage::Execute;
+                    }
+                    return ret;
+                }
+                _ => { println!("Fallthrough on FetchAddrAdjust with {:?}", self.stage); self.stage = CpuStage::Execute; return CpuReturnAction::None }
+            }
+        } else if self.stage == CpuStage::FetchAddrAdjust2 {
+            //do nothing with the value, it's a dummy read
+            let mode = Cpu::instruction_read_write_type(self.instruction);
+            match mode {
+                AddrMode::AbsoluteX | AddrMode::AbsoluteY => {
+                    self.stage = CpuStage::Execute;
+                    let mut addr = (self.operand1 as u16) | ((self.operand2.wrapping_add(1) as u16) << 8);
+                    if mode == AddrMode::AbsoluteX {
+                        addr = addr.wrapping_add(self.x as u16);
+                    } else {
+                        addr = addr.wrapping_add(self.y as u16);
+                    }
+                    return CpuReturnAction::Read(addr);
+                }
+                _ => { println!("Fallthrough on FetchAddrAdjust2 with {:?}", self.stage); self.stage = CpuStage::Execute; return CpuReturnAction::None }
             }
         }
 
@@ -185,6 +241,10 @@ impl Cpu {
                 },
                 _ => unreachable!("impossible value range somehow")
             }
+        }
+
+        if self.stage == CpuStage::WriteBack1 {
+            //todo
         }
         // return self.cycles;
         return CpuReturnAction::None;

@@ -2,12 +2,21 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use crate::nes::bus::Bus;
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PpuReturnAction {
+    None,
+    Read(u16),
+    Write(u16, u8),
+}
+
 pub struct Ppu {
     //internal registers
     w: bool, //w register/write latch
     t: u16, //t register/transfer address
     v: u16, //v register/vram addr
     v_temp: u16, //temp vram addr
+
+    frame_ready: bool,
 }
 
 impl Ppu {
@@ -17,7 +26,13 @@ impl Ppu {
             t: 0,
             v: 0,
             v_temp: 0,
+
+            frame_ready: false,
         }
+    }
+
+    pub fn is_frame_ready(&self) -> bool {
+        return self.frame_ready; //todo
     }
 
     pub fn reset(&mut self) {
@@ -29,8 +44,9 @@ impl Ppu {
         self.v_temp = 0;
     }
 
-    pub fn step(&mut self) {
+    pub fn step(&mut self, val: Option<u8>) -> PpuReturnAction {
         //todo: yeah
+        return PpuReturnAction::None;
     }
 
     pub fn write(&mut self, addr: u16, data: u8) {

@@ -4,10 +4,11 @@ use std::rc::Rc;
 use sdl3::render::WindowCanvas;
 use crate::nes::bus::Bus;
 use crate::nes::cpu;
-use cpu::{Cpu, CpuStage};
+use cpu::Cpu;
 use crate::nes::mapper::mapper;
 use mapper::Mapper;
-use crate::nes::ppu::Ppu;
+use crate::nes::cpu::CpuReturnAction;
+use crate::nes::ppu::{Ppu, PpuReturnAction};
 
 pub struct Nes {
     cpu: Cpu,
@@ -51,9 +52,51 @@ impl Nes {
         return self.mapper.read_cpu(addr);
     }
 
-    pub fn step(&mut self) {
-        let closure = self.cpu.step();
+    pub fn write_cpu(&mut self, addr: u16, val: u8) {
+        self.mapper.write_cpu(addr, val);
+        //todo: extend to other components
+    }
 
+    pub fn read_ppu(&mut self, addr: u16) -> u8 {
+        return self.mapper.read_ppu(addr & 0x3FFF); //ppu has a 14 bit address space
+    }
+
+    pub fn write_ppu(&mut self, addr: u16, val: u8) {
+        self.mapper.write_ppu(addr & 0x3FFF, val);
+        //todo: extend to other components
+    }
+
+    pub fn step(&mut self) { //processes one full frame
+        let mut cpu_val: Option<u8> = Option::None;
+        while self.ppu.is_frame_ready() {
+            let cpu_action = self.cpu.step(cpu_val);
+            while cpu_action != CpuReturnAction::None {
+                match cpu_action {
+                    CpuReturnAction::None => {}
+                    CpuReturnAction::Read(addr) => {
+                        cpu_val = Option::from(self.read_cpu(addr));
+                    }
+                    CpuReturnAction::Write(addr, write_val) => {
+                        self.write_cpu(addr, write_val);
+                        cpu_val = Option::None;
+                    }
+                }
+            }
+            let mut ppu_val: Option<u8> = Option::None;
+            for _ in 0..3 {
+                let ppu_action = self.ppu.step(ppu_val);
+                match ppu_action {
+                    PpuReturnAction::None => {}
+                    PpuReturnAction::Read(addr) => {
+                        ppu_val = Option::from(self.read_ppu(addr));
+                    }
+                    PpuReturnAction::Write(addr, write_val) => {
+                        self.write_ppu(addr, write_val);
+                        ppu_val = Option::None;
+                    }
+                }
+            }
+        }
 
         // if !self.is_halted() {
         //     let cpu_cycles = self.cpu.step();
