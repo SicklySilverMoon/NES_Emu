@@ -18,8 +18,11 @@ enum CpuStage {
     Decode,
     FetchOp1,
     FetchOp2,
-    FetchAddrAdjust,
+    FetchAddrAdjust, //I think I messed something up, todo: please fix
     FetchAddrAdjust2,
+    FetchAddrAdjust3,
+    FetchAddrAdjust4,
+    FetchAddrAdjust5,
     Execute,
     WriteBack1,
     WriteBack2,
@@ -63,6 +66,8 @@ pub struct Cpu {
     instruction: u8, //For storage across cycles/stages
     operand1: u8, //ditto
     operand2: u8, //ditto ditto
+    val: u8, //ditto ditto ditto
+    addr: u16, //used for storing addresses for some instructions
     cycles: u8, //how many cycles this instruction took
 }
 
@@ -90,6 +95,8 @@ impl Cpu {
             instruction: 0,
             operand1: 0,
             operand2: 0,
+            val: 0,
+            addr: 0,
             cycles: 0,
         }
     }
@@ -137,8 +144,14 @@ impl Cpu {
                     CpuReturnAction::Read(self.operand1 as u16)
                 }
                 AddrMode::Absolute | AddrMode::AbsoluteX | AddrMode::AbsoluteY |
-                AddrMode::Indirect | AddrMode::IndirectX | AddrMode::IndirectY => {
+                AddrMode::Indirect => {
                     self.stage = CpuStage::FetchOp2;
+                    let ret = CpuReturnAction::Read(self.pc);
+                    self.pc = self.pc.wrapping_add(1);
+                    ret
+                }
+                AddrMode::IndirectX | AddrMode::IndirectY => {
+                    self.stage = CpuStage::FetchAddrAdjust;
                     let ret = CpuReturnAction::Read(self.pc);
                     self.pc = self.pc.wrapping_add(1);
                     ret
@@ -156,18 +169,18 @@ impl Cpu {
             let mode = Cpu::instruction_read_write_type(self.instruction);
             match mode { //todo: some must fetch more, some must go right to execute, pretty easy to determine what's what
                 AddrMode::Absolute => {
-                    let ret = CpuReturnAction::Read((self.operand1 as u16) | ((self.operand2 as u16) << 8));
                     self.stage = CpuStage::Execute;
-                    return ret
+                    return CpuReturnAction::Read((self.operand1 as u16) | ((self.operand2 as u16) << 8));
                 }
                 AddrMode::AbsoluteX | AddrMode::AbsoluteY => {
-                    let ret = CpuReturnAction::Read((self.operand1 as u16) | ((self.operand2 as u16) << 8));
                     self.stage = CpuStage::Execute;
-                    return ret
+                    return CpuReturnAction::Read((self.operand1 as u16) | ((self.operand2 as u16) << 8));
                 }
-                AddrMode::Indirect => {}
-                AddrMode::IndirectX => {}
-                AddrMode::IndirectY => {}
+                AddrMode::Indirect => {
+                    //full indirect is only ever used for JMP
+                    self.stage = CpuStage::FetchAddrAdjust;
+                    return CpuReturnAction::Read((self.operand1 as u16) | ((self.operand2 as u16) << 8));
+                }
                 _ => { println!("Fallthrough on FetchOp2 with {:?}", self.stage); self.stage = CpuStage::Execute; return CpuReturnAction::None }
             }
         } else if self.stage == CpuStage::FetchAddrAdjust {
@@ -205,10 +218,24 @@ impl Cpu {
                     }
                     return ret;
                 }
+                AddrMode::Indirect => {
+                    //again just JMP
+                    self.addr = val.unwrap() as u16; //load lower byte
+                    self.stage = CpuStage::Execute;
+                    return CpuReturnAction::Read((self.operand1.wrapping_add(1) as u16) | ((self.operand2 as u16) << 8));
+                }
+                AddrMode::IndirectX => {
+                    self.stage = CpuStage::FetchAddrAdjust2;
+                    return CpuReturnAction::Read(self.operand1.wrapping_add(self.x) as u16);
+                }
+                AddrMode::IndirectY => {
+                    self.stage = CpuStage::FetchAddrAdjust2;
+                    return CpuReturnAction::Read(self.operand1 as u16);
+                }
                 _ => { println!("Fallthrough on FetchAddrAdjust with {:?}", self.stage); self.stage = CpuStage::Execute; return CpuReturnAction::None }
             }
         } else if self.stage == CpuStage::FetchAddrAdjust2 {
-            //do nothing with the value, it's a dummy read
+            //do nothing with the value, it's usually a dummy read
             let mode = Cpu::instruction_read_write_type(self.instruction);
             match mode {
                 AddrMode::AbsoluteX | AddrMode::AbsoluteY => {
@@ -221,26 +248,86 @@ impl Cpu {
                     }
                     return CpuReturnAction::Read(addr);
                 }
+                AddrMode::IndirectX => {
+                    self.addr = val.unwrap() as u16;
+                    self.stage = CpuStage::FetchAddrAdjust3;
+                    return CpuReturnAction::Read(self.operand1.wrapping_add(self.x).wrapping_add(1) as u16);
+                }
+                AddrMode::IndirectY => {
+                    self.addr = val.unwrap() as u16;
+                    self.stage = CpuStage::FetchAddrAdjust3;
+                    return CpuReturnAction::Read(self.operand1.wrapping_add(1) as u16);
+                }
                 _ => { println!("Fallthrough on FetchAddrAdjust2 with {:?}", self.stage); self.stage = CpuStage::Execute; return CpuReturnAction::None }
+            }
+        } else if self.stage == CpuStage::FetchAddrAdjust3 {
+            let mode = Cpu::instruction_read_write_type(self.instruction);
+            match mode {
+                AddrMode::IndirectX => {
+                    self.addr |= (val.unwrap() as u16) << 8; //load high byte
+                    self.stage = CpuStage::FetchAddrAdjust4;
+                    return CpuReturnAction::Read(self.addr); //todo: do branch on reading and writing here
+                }
+                AddrMode::IndirectY => {
+                    let (_, wrapped) = (self.addr as u8).overflowing_add(self.y);
+                    self.addr |= (val.unwrap() as u16) << 8; //load high byte
+                    if wrapped {
+                        self.stage = CpuStage::FetchAddrAdjust4;
+                        let pre_addr = self.addr;
+                        self.addr = self.addr.wrapping_add(self.y as u16);
+                        return CpuReturnAction::Read(pre_addr);
+                    } else {
+                        self.stage = CpuStage::Execute;
+                        return CpuReturnAction::Read(self.addr);
+                    }
+                }
+                _ => { println!("Fallthrough on FetchAddrAdjust3 with {:?}", self.stage); self.stage = CpuStage::Execute; return CpuReturnAction::None }
+            }
+        } else if self.stage == CpuStage::FetchAddrAdjust4 {
+            self.val = val.unwrap();
+            let mode = Cpu::instruction_read_write_type(self.instruction);
+            match mode {
+                AddrMode::IndirectX => {
+                    self.stage = CpuStage::Execute;
+                }
+                AddrMode::IndirectY => {
+                    self.stage = CpuStage::FetchAddrAdjust5;
+                    return CpuReturnAction::Read(self.addr);
+                }
+                _ => { println!("Fallthrough on FetchAddrAdjust4 with {:?}", self.stage); self.stage = CpuStage::Execute; return CpuReturnAction::None }
+            }
+        } else if self.stage == CpuStage::FetchAddrAdjust5 {
+            self.val = val.unwrap();
+            let mode = Cpu::instruction_read_write_type(self.instruction);
+            match mode {
+                AddrMode::IndirectY => {
+                    self.stage = CpuStage::Execute;
+                }
+                _ => { println!("Fallthrough on FetchAddrAdjust5 with {:?}", self.stage); self.stage = CpuStage::Execute; return CpuReturnAction::None }
             }
         }
 
         if self.stage == CpuStage::Execute {
+            if val.is_some() {
+                self.val = val.unwrap();
+            }
+            let action: CpuReturnAction;
             match self.instruction & 0x1F {
                 0x00 | 0x04 | 0x08 | 0x0C | 0x10 | 0x14 | 0x18 | 0x1C => {
-                    self.handle_control_instr(self.instruction);
+                    action = self.handle_control_instr(self.instruction);
                 },
                 0x01 | 0x05 | 0x09 | 0x0D | 0x11 | 0x15 | 0x19 | 0x1D => {
-                    self.handle_alu_instr(self.instruction);
+                    action = self.handle_alu_instr(self.instruction);
                 },
                 0x02 | 0x06 | 0x0A | 0x0E | 0x12 | 0x16 | 0x1A | 0x1E => {
-                    self.handle_rmw_instr(self.instruction);
+                    action = self.handle_rmw_instr(self.instruction);
                 },
                 0x03 | 0x07 | 0x0B | 0x0F | 0x13 | 0x17 | 0x1B | 0x1F => {
-                    self.handle_rmw_alu_instr(self.instruction);
+                    action = self.handle_rmw_alu_instr(self.instruction);
                 },
                 _ => unreachable!("impossible value range somehow")
             }
+            return action;
         }
 
         if self.stage == CpuStage::WriteBack1 {
@@ -250,7 +337,7 @@ impl Cpu {
         return CpuReturnAction::None;
     }
 
-    fn handle_control_instr(&mut self, op: u8) {
+    fn handle_control_instr(&mut self, op: u8) -> CpuReturnAction {
         let (read, write) = Cpu::instruction_needs_read_write(op);
 
         let mut matched = false;
@@ -266,33 +353,33 @@ impl Cpu {
             },
             0xA0 | 0xA4 | 0xB4 | 0xAC | 0xBC => { //LDY
                 matched = true;
-                self.y = val;
+                self.y = self.val;
                 self.z = self.y == 0;
                 self.n = self.y & 0x80 == 0x80;
             },
             0x84 | 0x94 | 0x8C => { //STY
                 matched = true;
-                val = self.y;
+                self.val = self.y;
             }
             0xC0 | 0xC4 | 0xCC => { //CPY
                 matched = true;
-                let result = self.y.wrapping_sub(val);
-                self.c = self.y >= val;
+                let result = self.y.wrapping_sub(self.val);
+                self.c = self.y >= self.val;
                 self.z = result == 0;
                 self.n = result & 0x80 == 0x80;
             },
             0xE0 | 0xE4 | 0xEC => { //CPX
                 matched = true;
-                let result = self.x.wrapping_sub(val);
-                self.c = self.x >= val;
+                let result = self.x.wrapping_sub(self.val);
+                self.c = self.x >= self.val;
                 self.z = result == 0;
                 self.n = result & 0x80 == 0x80;
             },
             0x24 | 0x2C => { //BIT
-                let result = self.a & val;
+                let result = self.a & self.val;
                 self.z = result == 0;
-                self.v = val & 0x40 == 0x40; //these use the value from mem for whatever reason?
-                self.n = val & 0x80 == 0x80;
+                self.v = self.val & 0x40 == 0x40; //these use the value from mem for whatever reason?
+                self.n = self.val & 0x80 == 0x80;
             },
             _ => (),
         }
@@ -302,7 +389,7 @@ impl Cpu {
                     self.push_stack_16(self.pc.wrapping_add(1)); //it's weird but BRK does just fully skip a byte
                     self.push_stack_flags();
                     self.i = true;
-                    self.pc = self.bus.borrow_mut().read_16(0xFFFE);
+                    self.pc = self.bus.borrow_mut().read_16(0xFFFE); //todo
                 } else if op == 0x20 { //JSR
                     self.push_stack_16(self.pc.wrapping_sub(1)); //notably, JSR points to one before the next instruction, conflicting with our method of reading operands first
                     self.pc = val_16;
@@ -340,24 +427,24 @@ impl Cpu {
                     self.n = self.x & 0x80 == 0x80;
                 }
             } else if op & 0x1F == 0x0C {
-                self.pc = val_16; //JMP
+                self.pc = self.addr; //JMP //todo
             } else if op & 0x1F == 0x10 {
                 if op == 0x10 && !self.n {
-                    self.pc = self.pc.wrapping_add_signed(val as i8 as i16); //BPL
+                    self.pc = self.pc.wrapping_add_signed(self.val as i8 as i16); //BPL
                 } else if op == 0x30 && self.n {
-                    self.pc = self.pc.wrapping_add_signed(val as i8 as i16); //BMI
+                    self.pc = self.pc.wrapping_add_signed(self.val as i8 as i16); //BMI
                 } else if op == 0x50 && !self.v {
-                    self.pc = self.pc.wrapping_add_signed(val as i8 as i16); //BVC
+                    self.pc = self.pc.wrapping_add_signed(self.val as i8 as i16); //BVC
                 } else if op == 0x70 && self.v {
-                    self.pc = self.pc.wrapping_add_signed(val as i8 as i16); //BVS
+                    self.pc = self.pc.wrapping_add_signed(self.val as i8 as i16); //BVS
                 } else if op == 0x90 && !self.c {
-                    self.pc = self.pc.wrapping_add_signed(val as i8 as i16); //BCC
+                    self.pc = self.pc.wrapping_add_signed(self.val as i8 as i16); //BCC
                 } else if op == 0xB0 && self.c {
-                    self.pc = self.pc.wrapping_add_signed(val as i8 as i16); //BCS
+                    self.pc = self.pc.wrapping_add_signed(self.val as i8 as i16); //BCS
                 } else if op == 0xD0 && !self.z {
-                    self.pc = self.pc.wrapping_add_signed(val as i8 as i16); //BNE
+                    self.pc = self.pc.wrapping_add_signed(self.val as i8 as i16); //BNE
                 } else if op == 0xF0 && self.z {
-                    self.pc = self.pc.wrapping_add_signed(val as i8 as i16); //BEQ
+                    self.pc = self.pc.wrapping_add_signed(self.val as i8 as i16); //BEQ
                 }
             } //0x14 is covered by earlier cases (NOP, STY, LDY)
             else if op & 0x1F == 0x18 {
@@ -379,82 +466,76 @@ impl Cpu {
                 todo!("SHY executed!") //SHY, lol
             }
         }
+        return CpuReturnAction::None;
     }
 
-    fn handle_alu_instr(&mut self, op: u8) {
+    fn handle_alu_instr(&mut self, op: u8) -> CpuReturnAction {
         let (read, write) = Cpu::instruction_needs_read_write(op);
 
         match op & 0xE0 { //actual implementations
             0x00 => { //ORA
-                self.a = self.a | val;
+                self.a = self.a | self.val;
                 self.z = self.a == 0;
                 self.n = self.a & 0x80 == 0x80;
             },
             0x20 => { //AND
-                self.a = self.a & val;
+                self.a = self.a & self.val;
                 self.z = self.a == 0;
                 self.n = self.a & 0x80 == 0x80;
             },
             0x40 => { //EOR/XOR
-                self.a = self.a ^ val;
+                self.a = self.a ^ self.val;
                 self.z = self.a == 0;
                 self.n = self.a & 0x80 == 0x80;
             },
             0x60 => { //ADC
                 let pre_a = self.a;
-                self.a = self.a.wrapping_add(val).wrapping_add(u8::from(self.c));
+                self.a = self.a.wrapping_add(self.val).wrapping_add(u8::from(self.c));
 
-                self.c = (pre_a as u16 + val as u16 + self.c as u16) > 0xFF; //todo: stupid way of doing this, fix that
+                self.c = (pre_a as u16 + self.val as u16 + self.c as u16) > 0xFF; //todo: stupid way of doing this, fix that
                 self.z = self.a == 0;
                 self.n = self.a & 0x80 == 0x80;
-                self.v = (self.a ^ pre_a) & (self.a ^ val) & 0x80 != 0
+                self.v = (self.a ^ pre_a) & (self.a ^ self.val) & 0x80 != 0;
             },
             0x80 => { //STA
-                val = self.a;
+                self.val = self.a;
             }
             0xA0 => { //LDA
-                self.a = val;
+                self.a = self.val;
                 self.z = self.a == 0;
                 self.n = self.a & 0x80 == 0x80;
             }
             0xC0 => { //CMP
-                self.c = self.a >= val;
-                self.z = self.a == val;
-                self.n = (self.a - val) & 0x80 == 0x80;
+                self.c = self.a >= self.val;
+                self.z = self.a == self.val;
+                self.n = (self.a - self.val) & 0x80 == 0x80;
             }
             0xE0 => { //SBC
                 let pre_a = self.a;
-                self.a = self.a.wrapping_sub(val).wrapping_sub(!self.c as u8);
+                self.a = self.a.wrapping_sub(self.val).wrapping_sub(!self.c as u8);
 
-                self.c = !(pre_a as i16 - val as i16 - (!self.c) as i16) < 0;
+                self.c = !(pre_a as i16 - self.val as i16 - (!self.c) as i16) < 0;
                 self.z = self.a == 0;
                 self.n = self.a & 0x80 == 0x80;
-                self.v = (self.a ^ pre_a) & (self.a ^ !val) & 0x80 != 0
+                self.v = (self.a ^ pre_a) & (self.a ^ !self.val) & 0x80 != 0;
             }
             _ => unreachable!("impossible value range somehow")
         }
+        return CpuReturnAction::None;
     }
 
-    fn handle_rmw_instr(&mut self, op: u8) {
+    fn handle_rmw_instr(&mut self, op: u8) -> CpuReturnAction {
         let (read, write) = Cpu::instruction_needs_read_write(op);
-
-        if read && write {
-            val = self.bus.borrow_mut().read(addr); //load the starting value
-            self.cycles += 2;
-            //todo: we also need to handle indirect page cross dummy reads
-            //todo: and dummy writes
-        }
-
         match op & 0x1F { //just to catch STPs
             0x02 => {
                 if op & 0xE0 <= 0x60 { //STP
                     self.halted = true;
-                    return;
+                    return CpuReturnAction::None;
                 }
             },
             0x12 => { //STP
                 self.halted = true;
-                return;
+                return CpuReturnAction::None;
             }
             _ => (),
         }
@@ -462,57 +543,57 @@ impl Cpu {
         match op & 0xE0 { //actual implementations
             0x00 => { //ASL
                 if op & 0x1F == 0x0A { //accum version
-                    val = self.a; //todo: missing cycle counts on accum versions
+                    self.val = self.a; //todo: missing cycle counts on accum versions
                 }
-                self.c = val & 0x80 == 0x80;
-                val <<= 1;
-                self.z = val == 0;
-                self.n = val & 0x80 == 0x80;
+                self.c = self.val & 0x80 == 0x80;
+                self.val <<= 1;
+                self.z = self.val == 0;
+                self.n = self.val & 0x80 == 0x80;
                 if op & 0x1F == 0x0A { //accum version
-                    self.a = val;
+                    self.a = self.val;
                 }
             },
             0x20 => { //ROL
                 if op & 0x1F == 0x0A {
-                    val = self.a;
+                    self.val = self.a;
                 }
-                let to_c = val & 0x80 == 0x80;
-                val <<= 1;
-                val |= self.c as u8;
+                let to_c = self.val & 0x80 == 0x80;
+                self.val <<= 1;
+                self.val |= self.c as u8;
                 self.c = to_c;
                 if op & 0x1F == 0x0A {
-                    self.a = val;
+                    self.a = self.val;
                 }
             },
             0x40 => { //LSR
                 if op & 0x1F == 0x0A {
-                    val = self.a;
+                    self.val = self.a;
                 }
-                self.c = val & 0x01 == 0x01;
-                val >>= 1;
-                self.z = val == 0;
+                self.c = self.val & 0x01 == 0x01;
+                self.val >>= 1;
+                self.z = self.val == 0;
                 self.n = false; //lol
                 if op & 0x1F == 0x0A {
-                    self.a = val;
+                    self.a = self.val;
                 }
             },
             0x60 => { //ROR
                 if op & 0x1F == 0x0A {
-                    val = self.a;
+                    self.val = self.a;
                 }
-                let to_c = val & 0x01 == 0x01;
-                val >>= 1;
-                val |= (self.c as u8) << 7;
+                let to_c = self.val & 0x01 == 0x01;
+                self.val >>= 1;
+                self.val |= (self.c as u8) << 7;
                 self.c = to_c;
-                self.z = val == 0;
-                self.n = val & 0x80 == 0x80;
+                self.z = self.val == 0;
+                self.n = self.val & 0x80 == 0x80;
                 if op & 0x1F == 0x0A {
-                    self.a = val;
+                    self.a = self.val;
                 }
             },
             0x80 => {
                 if op & 0x1F == 0x06 || op & 0x1F == 0x0E || op & 0x1F == 0x16 { //STX
-                    val = self.x;
+                    self.val = self.x;
                 } else if op & 0x1F == 0x0A { //TXA
                     self.a = self.x;
                     self.z = self.a == 0;
@@ -525,7 +606,7 @@ impl Cpu {
             },
             0xA0 => {
                 if op & 0x1F == 0x02 || op & 0x1F == 0x06 || op & 0x1F == 0x0E || op & 0x1F == 0x16 || op & 0x1F == 0x1E { //LDX
-                    self.x = val;
+                    self.x = self.val;
                     self.z = self.x == 0;
                     self.n = self.x & 0x80 == 0x80;
                 } else if op & 0x1F == 0x0A { //TAX
@@ -540,49 +621,53 @@ impl Cpu {
             },
             0xC0 => { //DEC, DEX
                 if op & 0x1F == 0x0A { //X instead of A lol
-                    val = self.x;
+                    self.val = self.x;
                 }
-                val = val.wrapping_sub(1);
-                self.z = val == 0;
-                self.n = val & 0x80 == 0x80;
+                self.val = self.val.wrapping_sub(1);
+                self.z = self.val == 0;
+                self.n = self.val & 0x80 == 0x80;
                 if op & 0x1F == 0x0A {
-                    self.x = val;
+                    self.x = self.val;
                 }
             },
             0xE0 => { //INC
                 //No accum version
-                val = val.wrapping_add(1);
-                self.z = val == 0;
-                self.n = val & 0x80 == 0x80;
+                self.val = self.val.wrapping_add(1);
+                self.z = self.val == 0;
+                self.n = self.val & 0x80 == 0x80;
             }
             _ => unreachable!("impossible value range somehow")
         }
 
-        if write && !read {
-            match op & 0x1F {
-                0x02 => {
-                    self.write_immediate(val);
-                },
-                0x06 => {
-                    self.write_zero_page(val);
-                },
-                0x0E => {
-                    self.write_absolute(val);
-                },
-                0x16 => {
-                    self.write_zero_page_x(val);
-                },
-                0x1E => {
-                    self.write_absolute_x(val);
-                },
-                _ => unreachable!("impossible value range somehow")
-            }
-        } else if write && read {
-            self.bus.borrow_mut().write(addr, val); //write back to the earlier grabbed value
+        if write {
+            return CpuReturnAction::Write((self.operand1 as u16) | ((self.operand2 as u16) << 8), self.val);
         }
+        return CpuReturnAction::None;
+        // if write && !read {
+        //     match op & 0x1F {
+        //         0x02 => {
+        //             self.write_immediate(val);
+        //         },
+        //         0x06 => {
+        //             self.write_zero_page(val);
+        //         },
+        //         0x0E => {
+        //             self.write_absolute(val);
+        //         },
+        //         0x16 => {
+        //             self.write_zero_page_x(val);
+        //         },
+        //         0x1E => {
+        //             self.write_absolute_x(val);
+        //         },
+        //         _ => unreachable!("impossible value range somehow")
+        //     }
+        // } else if write && read {
+        //     self.bus.borrow_mut().write(addr, val); //write back to the earlier grabbed value
+        // }
     }
 
-    fn handle_rmw_alu_instr(&mut self, op: u8) {
+    fn handle_rmw_alu_instr(&mut self, op: u8) -> CpuReturnAction {
         todo!("RMW ALU combined instructions hit!")
     }
 
