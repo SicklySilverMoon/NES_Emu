@@ -10,6 +10,7 @@ pub enum CpuReturnAction {
     None,
     Read(u16),
     Write(u16, u8),
+    WriteRead(u16, u8, u16),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -116,6 +117,7 @@ impl Cpu {
 
     pub fn step(&mut self, val: Option<u8>) -> CpuReturnAction { //return an address that the NES must read, or an address to write, or nothing
         if self.stage == CpuStage::FetchIns {
+            self.cycles = 0; //Couple instruction impls use this to track their internal stage, so we need to reset it here
             self.stage = CpuStage::Decode;
             return CpuReturnAction::Read(self.pc);
         } else if self.stage == CpuStage::Decode {
@@ -386,10 +388,29 @@ impl Cpu {
         if !matched {
             if op & 0x1F == 0x00 {
                 if op == 0x00 { //BRK
-                    self.push_stack_16(self.pc.wrapping_add(1)); //it's weird but BRK does just fully skip a byte
-                    self.push_stack_flags();
-                    self.i = true;
-                    self.pc = self.bus.borrow_mut().read_16(0xFFFE); //todo
+                    if self.cycles == 0 { //todo: add hijacking lol
+                        self.cycles += 1;
+                        return self.push_stack((self.pc >> 8) as u8);
+                    } else if self.cycles == 1 {
+                        self.cycles += 1;
+                        return self.push_stack(self.pc as u8);
+                    } else if self.cycles == 2 {
+                        self.cycles += 1;
+                        if let CpuReturnAction::Write(addr, val) = self.push_stack_flags() {
+                            return CpuReturnAction::WriteRead(addr, val, 0xFFFE);
+                        } else {
+                            unreachable!("BRK should always push flags");
+                        }
+                    } else if self.cycles == 3 {
+                        self.cycles += 1;
+                        self.addr = self.val as u16;
+                        return CpuReturnAction::Read(0xFFFF);
+                    } else if self.cycles == 4 {
+                        self.cycles += 1;
+                        self.addr |= (self.val as u16) << 8;
+                        self.i = true;
+                        self.pc = self.addr;
+                    }
                 } else if op == 0x20 { //JSR
                     self.push_stack_16(self.pc.wrapping_sub(1)); //notably, JSR points to one before the next instruction, conflicting with our method of reading operands first
                     self.pc = val_16;
@@ -466,6 +487,7 @@ impl Cpu {
                 todo!("SHY executed!") //SHY, lol
             }
         }
+        self.stage = CpuStage::FetchIns;
         return CpuReturnAction::None;
     }
 
@@ -686,7 +708,7 @@ impl Cpu {
                         return (true, false); //notably, this ends up not covering earlier exceptions
                     }
                     0x00 => {
-                        if (op & 0xE0 >= 0x80) || (op & 0xE0 == 0x20) { //bunch of loads and a JSR
+                        if (op & 0xE0 >= 0x80) || (op & 0xE0 == 0x20) || op == 0x00 { //bunch of loads, a JSR, and BRK
                             return (true, false);
                         }
                         return (false, false);
@@ -759,6 +781,7 @@ impl Cpu {
                                 // val_16 = self.get_absolute_addr();
                                 // self.cycles += 2; //JSR takes 6, adding the extra 2 here
                             }
+                            return AddrMode::Immediate; //BRK
                         },
                         0x04 => {
                             return AddrMode::ZeroPage;
@@ -871,15 +894,15 @@ impl Cpu {
         return AddrMode::Implied;
     }
 
-    fn push_stack(&mut self, val: u8) {
+    fn push_stack(&mut self, val: u8) -> CpuReturnAction {
         let addr = 0x0100u16 + self.s as u16;
         self.s = self.s.wrapping_sub(1);
-        self.bus.borrow_mut().write(addr, val);
+        return CpuReturnAction::Write(addr, val);
     }
 
-    fn push_stack_flags(&mut self) {
+    fn push_stack_flags(&mut self) -> CpuReturnAction {
         let val: u8 = (self.n as u8) << 7 | (self.v as u8) << 6 | 1 << 5 | 1 << 4 | (self.d as u8) << 3 | (self.i as u8) << 2 | (self.z as u8) << 1 | (self.c as u8) << 0;
-        self.push_stack(val);
+        return self.push_stack(val);
     }
 
     fn push_stack_16(&mut self, val: u16) {

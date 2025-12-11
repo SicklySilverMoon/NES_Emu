@@ -80,6 +80,10 @@ impl Nes {
                         self.write_cpu(addr, write_val);
                         cpu_val = Option::None;
                     }
+                    CpuReturnAction::WriteRead(addr_write, write_val, addr_read) => {
+                        self.write_cpu(addr_write, write_val);
+                        cpu_val = Option::from(self.read_cpu(addr_read));
+                    }
                 }
             }
             let mut ppu_val: Option<u8> = Option::None;
