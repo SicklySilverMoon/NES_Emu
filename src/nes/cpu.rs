@@ -5,10 +5,11 @@ use std::unreachable;
 use crate::nes::bus::Bus;
 use crate::nes::nes::Nes;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+// #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CpuReturnAction {
     None,
     Read(u16),
+    ReadCallback(u16, Box<dyn Fn(u8)>),
     Write(u16, u8),
     WriteRead(u16, u8, u16),
 }
@@ -23,7 +24,6 @@ enum CpuStage {
     FetchAddrAdjust2,
     FetchAddrAdjust3,
     FetchAddrAdjust4,
-    FetchAddrAdjust5,
     Execute,
     WriteBack1,
     WriteBack2,
@@ -263,12 +263,18 @@ impl Cpu {
                 _ => { println!("Fallthrough on FetchAddrAdjust2 with {:?}", self.stage); self.stage = CpuStage::Execute; return CpuReturnAction::None }
             }
         } else if self.stage == CpuStage::FetchAddrAdjust3 {
+            //do nothing with the value, it's a dummy read
+            let (read, write) = Cpu::instruction_needs_read_write(self.instruction);
             let mode = Cpu::instruction_read_write_type(self.instruction);
             match mode {
                 AddrMode::IndirectX => {
                     self.addr |= (val.unwrap() as u16) << 8; //load high byte
-                    self.stage = CpuStage::FetchAddrAdjust4;
-                    return CpuReturnAction::Read(self.addr); //todo: do branch on reading and writing here
+                    self.stage = CpuStage::Execute;
+                    if read {
+                        return CpuReturnAction::Read(self.addr); //todo: do branch on reading and writing here
+                    } else {
+                        return CpuReturnAction::None;
+                    }
                 }
                 AddrMode::IndirectY => {
                     let (_, wrapped) = (self.addr as u8).overflowing_add(self.y);
@@ -289,23 +295,11 @@ impl Cpu {
             self.val = val.unwrap();
             let mode = Cpu::instruction_read_write_type(self.instruction);
             match mode {
-                AddrMode::IndirectX => {
-                    self.stage = CpuStage::Execute;
-                }
                 AddrMode::IndirectY => {
-                    self.stage = CpuStage::FetchAddrAdjust5;
+                    self.stage = CpuStage::Execute;
                     return CpuReturnAction::Read(self.addr);
                 }
                 _ => { println!("Fallthrough on FetchAddrAdjust4 with {:?}", self.stage); self.stage = CpuStage::Execute; return CpuReturnAction::None }
-            }
-        } else if self.stage == CpuStage::FetchAddrAdjust5 {
-            self.val = val.unwrap();
-            let mode = Cpu::instruction_read_write_type(self.instruction);
-            match mode {
-                AddrMode::IndirectY => {
-                    self.stage = CpuStage::Execute;
-                }
-                _ => { println!("Fallthrough on FetchAddrAdjust5 with {:?}", self.stage); self.stage = CpuStage::Execute; return CpuReturnAction::None }
             }
         }
 
@@ -412,8 +406,20 @@ impl Cpu {
                         self.pc = self.addr;
                     }
                 } else if op == 0x20 { //JSR
-                    self.push_stack_16(self.pc.wrapping_sub(1)); //notably, JSR points to one before the next instruction, conflicting with our method of reading operands first
-                    self.pc = val_16;
+                    if self.cycles == 0 {
+                        self.cycles += 1;
+                        return CpuReturnAction::Read(self.get_stack_addr());
+                    } else if self.cycles == 1 {
+                        self.cycles += 1;
+                        return self.push_stack((self.pc >> 8) as u8);
+                    } else if self.cycles == 2 {
+                        self.cycles += 1;
+                        return self.push_stack((self.pc) as u8);
+                    } else if self.cycles == 3 {
+                        self.cycles += 1;
+                        self.pc = self.val as u16;
+                        return CpuReturnAction::ReadCallback(self.pc.wrapping_add(1), Box::new(move |val| {self.pc |= (val as u16) << 8})); //fetch straight into PCH
+                    }
                 } else if op == 0x40 { //RTI
                     self.pop_stack_flags();
                     self.pc = self.pop_stack_16();
@@ -894,8 +900,12 @@ impl Cpu {
         return AddrMode::Implied;
     }
 
+    fn get_stack_addr(&self) -> u16 {
+        return 0x0100u16 + self.s as u16;
+    }
+
     fn push_stack(&mut self, val: u8) -> CpuReturnAction {
-        let addr = 0x0100u16 + self.s as u16;
+        let addr = self.get_stack_addr();
         self.s = self.s.wrapping_sub(1);
         return CpuReturnAction::Write(addr, val);
     }
@@ -910,10 +920,10 @@ impl Cpu {
         self.push_stack((val >> 8) as u8);
     }
 
-    fn pop_stack(&mut self) -> u8 {
+    fn pop_stack(&mut self) -> CpuReturnAction {
         self.s = self.s.wrapping_add(1);
-        let addr = 0x0100u16 + self.s as u16;
-        return self.bus.borrow_mut().read(addr);
+        let addr = self.get_stack_addr();
+        return CpuReturnAction::Read(addr);
     }
 
     fn pop_stack_flags(&mut self) {

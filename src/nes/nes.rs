@@ -70,9 +70,11 @@ impl Nes {
         let mut cpu_val: Option<u8> = Option::None;
         while self.ppu.is_frame_ready() {
             let cpu_action = self.cpu.step(cpu_val);
-            while cpu_action != CpuReturnAction::None {
+            loop {
                 match cpu_action {
-                    CpuReturnAction::None => {}
+                    CpuReturnAction::None => {
+                        break
+                    }
                     CpuReturnAction::Read(addr) => {
                         cpu_val = Option::from(self.read_cpu(addr));
                     }
@@ -83,6 +85,9 @@ impl Nes {
                     CpuReturnAction::WriteRead(addr_write, write_val, addr_read) => {
                         self.write_cpu(addr_write, write_val);
                         cpu_val = Option::from(self.read_cpu(addr_read));
+                    }
+                    CpuReturnAction::ReadCallback(addr, ref callback) => {
+                        callback(self.read_cpu(addr));
                     }
                 }
             }
