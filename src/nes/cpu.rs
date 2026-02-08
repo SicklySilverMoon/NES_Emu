@@ -9,7 +9,7 @@ use crate::nes::nes::Nes;
 pub enum CpuReturnAction {
     None,
     Read(u16),
-    ReadCallback(u16, Box<dyn Fn(u8)>),
+    ReadCallback(u16, Box<dyn Fn(u8, &mut Cpu)>),
     Write(u16, u8),
     WriteRead(u16, u8, u16),
 }
@@ -47,9 +47,9 @@ enum AddrMode {
 
 pub struct Cpu {
     pc: u16,
+    a: u8,
     x: u8,
     y: u8,
-    a: u8,
 
     s: u8, //stack pointer
 
@@ -70,15 +70,18 @@ pub struct Cpu {
     val: u8, //ditto ditto ditto
     addr: u16, //used for storing addresses for some instructions
     cycles: u8, //how many cycles this instruction took
+
+    total_cycles: u64, //how many total cycles have been executed since reset
+    temp_cycles: u64, //tracelogging
 }
 
 impl Cpu {
     pub fn new() -> Cpu {
         return Cpu {
             pc: 0,
+            a: 0,
             x: 0,
             y: 0,
-            a: 0,
 
             s: 0x00, //since reset is USUALLY called after creation this *should* be fine
 
@@ -99,6 +102,9 @@ impl Cpu {
             val: 0,
             addr: 0,
             cycles: 0,
+
+            total_cycles: 0,
+            temp_cycles: 0,
         }
     }
 
@@ -113,21 +119,294 @@ impl Cpu {
         self.i = true;
         self.halted = false;
         self.stage = CpuStage::FetchIns;
+
+        self.total_cycles = 7; //todo
+    }
+
+    fn tracelog(&mut self) {
+        if self.stage == CpuStage::FetchIns {
+            self.temp_cycles = self.total_cycles;
+            print!("${:04X}\t", self.pc);
+            return;
+        }
+
+        let (read, write) = Cpu::instruction_needs_read_write(self.instruction);
+        let mode = Cpu::instruction_read_write_type(self.instruction);
+
+        let instr_str: &str;
+        match self.instruction {
+            0x69 | 0x65 | 0x75 | 0x6D | 0x7D | 0x79 | 0x61 | 0x71 => {
+                instr_str = "ADC";
+            },
+            0x29 | 0x25 | 0x35 | 0x2D | 0x3D | 0x39 | 0x21 | 0x31 => {
+                instr_str = "AND";
+            },
+            0x0A | 0x06 | 0x16 | 0x0E | 0x1E => {
+                instr_str = "ASL";
+            },
+            0x90 => {
+                instr_str = "BCC";
+            },
+            0xB0 => {
+                instr_str = "BCS";
+            },
+            0xF0 => {
+                instr_str = "BEQ";
+            },
+            0x24 | 0x2C => {
+                instr_str = "BIT";
+            },
+            0x30 => {
+                instr_str = "BMI";
+            },
+            0xD0 => {
+                instr_str = "BNE";
+            },
+            0x10 => {
+                instr_str = "BPL";
+            },
+            0x00 => {
+                instr_str = "BRK";
+            },
+            0x50 => {
+                instr_str = "BVC";
+            },
+            0x70 => {
+                instr_str = "BVS";
+            },
+            0x18 => {
+                instr_str = "CLC";
+            },
+            0xD8 => {
+                instr_str = "CLD";
+            },
+            0x58 => {
+                instr_str = "CLI";
+            },
+            0xB8 => {
+                instr_str = "CLV";
+            },
+            0xC9 | 0xC5 | 0xD5 | 0xCD | 0xDD | 0xD9 | 0xC1 | 0xD1 => {
+                instr_str = "CMP";
+            },
+            0xE0 | 0xE4 | 0xEC => {
+                instr_str = "CPX";
+            },
+            0xC0 | 0xC4 | 0xCC => {
+                instr_str = "CPY";
+            },
+            0xC6 | 0xD6 | 0xCE | 0xDE => {
+                instr_str = "DEC";
+            },
+            0xCA => {
+                instr_str = "DEX";
+            },
+            0x88 => {
+                instr_str = "DEY";
+            },
+            0x49 | 0x45 | 0x55 | 0x4D | 0x5D | 0x59 | 0x41 | 0x51 => {
+                instr_str = "EOR";
+            },
+            0xE6 | 0xF6 | 0xEE | 0xFE => {
+                instr_str = "INC";
+            },
+            0xE8 => {
+                instr_str = "INX";
+            },
+            0xC8 => {
+                instr_str = "INY";
+            },
+            0x4C | 0x6C => {
+                instr_str = "JMP";
+            },
+            0x20 => {
+                instr_str = "JSR";
+            },
+            0xA9 | 0xA5 | 0xB5 | 0xAD | 0xBD | 0xB9 | 0xA1 | 0xB1 => {
+                instr_str = "LDA";
+            },
+            0xA2 | 0xA6 | 0xB6 | 0xAE | 0xBE => {
+                instr_str = "LDX";
+            },
+            0xA0 | 0xA4 | 0xB4 | 0xAC | 0xBC => {
+                instr_str = "LDY";
+            },
+            0x4A | 0x46 | 0x56 | 0x4E | 0x5E => {
+                instr_str = "LSR";
+            },
+            0xEA => {
+                instr_str = "NOP";
+            },
+            0x09 | 0x05 | 0x15 | 0x0D | 0x1D | 0x19 | 0x01 | 0x11 => {
+                instr_str = "ORA";
+            },
+            0x48 => {
+                instr_str = "PHA";
+            },
+            0x08 => {
+                instr_str = "PHP";
+            },
+            0x68 => {
+                instr_str = "PLA";
+            },
+            0x28 => {
+                instr_str = "PLP";
+            },
+            0x2A | 0x26 | 0x36 | 0x2E | 0x3E => {
+                instr_str = "ROL";
+            },
+            0x6A | 0x66 | 0x76 | 0x6E | 0x7E => {
+                instr_str = "ROR";
+            },
+            0x40 => {
+                instr_str = "RTI";
+            },
+            0x60 => {
+                instr_str = "RTS";
+            },
+            0xE9 | 0xE5 | 0xF5 | 0xED | 0xFD | 0xF9 | 0xE1 | 0xF1 => {
+                instr_str = "SBC";
+            },
+            0x38 => {
+                instr_str = "SEC";
+            },
+            0xF8 => {
+                instr_str = "SED";
+            },
+            0x78 => {
+                instr_str = "SEI";
+            },
+            0x85 | 0x95 | 0x8D | 0x9D | 0x99 | 0x81 | 0x91 => {
+                instr_str = "STA";
+            },
+            0x86 | 0x96 | 0x8E => {
+                instr_str = "STX";
+            },
+            0x84 | 0x94 | 0x8C => {
+                instr_str = "STY";
+            },
+            0xAA => {
+                instr_str = "TAX";
+            },
+            0xA8 => {
+                instr_str = "TAY";
+            },
+            0xBA => {
+                instr_str = "TSX";
+            },
+            0x8A => {
+                instr_str = "TXA";
+            },
+            0x9A => {
+                instr_str = "TXS";
+            },
+            0x98 => {
+                instr_str = "TYA";
+            },
+            0x02 => {
+                instr_str = "STP";
+            }
+            _ => {
+                todo!("unimplemented instruction: {:02X}", self.instruction);
+            }
+        }
+        match mode {
+            AddrMode::Implied => {
+                print!("{:02X}\t\t{}\t\t", self.instruction, instr_str);
+            }
+            AddrMode::Immediate => {
+                print!("{:02X} {:02X}\t\t{} #{:02X}\t\t", self.instruction, self.operand1, instr_str, self.operand1);
+            }
+            AddrMode::ZeroPage => {
+                print!("{:02X} {:02X}\t\t{} <{:02X}\t\t", self.instruction, self.operand1, instr_str, self.operand1);
+            }
+            AddrMode::ZeroPageX => {
+                print!("{:02X} {:02X}\t\t{} <{:02X}, X\t", self.instruction, self.operand1, instr_str, self.operand1);
+            }
+            AddrMode::ZeroPageY => {
+                print!("{:02X} {:02X}\t\t{} <{:02X}, Y\t", self.instruction, self.operand1, instr_str, self.operand1);
+            }
+            AddrMode::Absolute => {
+                print!("{:02X}\t\t{} ${:04X}\t", self.instruction, instr_str, self.addr);
+            }
+            AddrMode::AbsoluteX => {
+                print!("{:02X}\t\t{} ${:04X}, X\t", self.instruction, instr_str, self.addr);
+            }
+            AddrMode::AbsoluteY => {
+                print!("{:02X}\t\t{} ${:04X}, Y\t", self.instruction, instr_str, self.addr);
+            }
+            AddrMode::Indirect => {
+                print!("{:02X} {:02X} {:02X}\t{} (${:04X})\t", self.instruction, self.operand1, self.operand2, instr_str, self.addr);
+            }
+            AddrMode::IndirectX => {
+                print!("{:02X}\t\t{} (${:04X}, X)\t", self.instruction, instr_str, self.addr);
+            }
+            AddrMode::IndirectY => {
+                print!("{:02X}\t\t{} (${:04X}), Y\t", self.instruction, instr_str, self.addr);
+            }
+            AddrMode::Accumulator => {
+                print!("{:02X}\t\t{} A\t\t", self.instruction, instr_str);
+            }
+        }
+        print!("A: {:02X} X: {:02X} Y: {:02X} SP: {:02X}\t", self.a, self.x, self.y, self.s);
+        if self.n {
+            print!("N");
+        } else {
+            print!("n");
+        }
+        if self.v {
+            print!("V");
+        } else {
+            print!("v");
+        }
+        print!("--");
+        if self.d {
+            print!("D");
+        } else {
+            print!("d");
+        }
+        if self.i {
+            print!("I");
+        } else {
+            print!("i");
+        }
+        if self.z {
+            print!("Z");
+        } else {
+            print!("z");
+        }
+        if self.c {
+            print!("C");
+        } else {
+            print!("c");
+        }
+        println!("\tCycle: {}", self.temp_cycles);
     }
 
     pub fn step(&mut self, val: Option<u8>) -> CpuReturnAction { //return an address that the NES must read, or an address to write, or nothing
         if self.stage == CpuStage::FetchIns {
+            self.tracelog();
+        }
+        self.total_cycles += 1;
+
+        if self.stage == CpuStage::FetchIns {
             self.cycles = 0; //Couple instruction impls use this to track their internal stage, so we need to reset it here
             self.stage = CpuStage::Decode;
-            return CpuReturnAction::Read(self.pc);
+            let ret = CpuReturnAction::Read(self.pc);
+            self.pc = self.pc.wrapping_add(1);
+            return ret;
         } else if self.stage == CpuStage::Decode {
             self.instruction = val.unwrap(); //shouldn't panic
             let (read, write) = Cpu::instruction_needs_read_write(self.instruction);
+            let mode = Cpu::instruction_read_write_type(self.instruction);
             return if read || write {
                 self.stage = CpuStage::FetchOp1;
                 let ret = CpuReturnAction::Read(self.pc);
                 self.pc = self.pc.wrapping_add(1);
                 ret
+            } else if mode == AddrMode::Implied {
+                self.stage = CpuStage::FetchOp1;
+                CpuReturnAction::Read(self.pc)
             } else {
                 self.stage = CpuStage::Execute;
                 CpuReturnAction::None
@@ -135,33 +414,45 @@ impl Cpu {
         } else if self.stage == CpuStage::FetchOp1 {
             self.operand1 = val.unwrap();
 
+            let (read, write) = Cpu::instruction_needs_read_write(self.instruction);
             let mode = Cpu::instruction_read_write_type(self.instruction);
-            return match mode { //todo: start splitting on read and writes, as some stuff just reads, some stuff just needs ops for writes, and some weird ones (indexed stuff) do both
+            match mode { //todo: start splitting on read and writes, as some stuff just reads, some stuff just needs ops for writes, and some weird ones (indexed stuff) do both
+                AddrMode::Implied => { //do nothing with the read value
+                    self.stage = CpuStage::Execute;
+                    return CpuReturnAction::None;
+                }
+                AddrMode::Immediate => {
+                    self.stage = CpuStage::Execute;
+                    //notably no return, go straight to execute
+                }
                 AddrMode::ZeroPage => {
                     self.stage = CpuStage::Execute;
-                    CpuReturnAction::Read(self.operand1 as u16)
+                    self.addr = self.operand1 as u16;
+                    if read {
+                        return CpuReturnAction::Read(self.addr);
+                    }
                 }
                 AddrMode::ZeroPageX | AddrMode::ZeroPageY => {
                     self.stage = CpuStage::FetchAddrAdjust;
-                    CpuReturnAction::Read(self.operand1 as u16)
+                    return CpuReturnAction::Read(self.operand1 as u16);
                 }
                 AddrMode::Absolute | AddrMode::AbsoluteX | AddrMode::AbsoluteY |
                 AddrMode::Indirect => {
                     self.stage = CpuStage::FetchOp2;
                     let ret = CpuReturnAction::Read(self.pc);
                     self.pc = self.pc.wrapping_add(1);
-                    ret
+                    return ret;
                 }
                 AddrMode::IndirectX | AddrMode::IndirectY => {
                     self.stage = CpuStage::FetchAddrAdjust;
                     let ret = CpuReturnAction::Read(self.pc);
-                    self.pc = self.pc.wrapping_add(1);
-                    ret
+                    // self.pc = self.pc.wrapping_add(1);
+                    return ret;
                 }
                 _ => {
-                    println!("Fallthrough on FetchOp1 with {:?}", self.stage);
+                    println!("Fallthrough on FetchOp1 with {:?}", self.instruction);
                     self.stage = CpuStage::Execute;
-                    CpuReturnAction::None
+                    return CpuReturnAction::None;
                 }
             }
         } else if self.stage == CpuStage::FetchOp2 {
@@ -172,18 +463,21 @@ impl Cpu {
             match mode { //todo: some must fetch more, some must go right to execute, pretty easy to determine what's what
                 AddrMode::Absolute => {
                     self.stage = CpuStage::Execute;
-                    return CpuReturnAction::Read((self.operand1 as u16) | ((self.operand2 as u16) << 8));
+                    self.addr = (self.operand1 as u16) | ((self.operand2 as u16) << 8);
+                    return CpuReturnAction::Read(self.addr);
                 }
                 AddrMode::AbsoluteX | AddrMode::AbsoluteY => {
                     self.stage = CpuStage::Execute;
-                    return CpuReturnAction::Read((self.operand1 as u16) | ((self.operand2 as u16) << 8));
+                    self.addr = (self.operand1 as u16) | ((self.operand2 as u16) << 8);
+                    return CpuReturnAction::Read(self.addr);
                 }
                 AddrMode::Indirect => {
                     //full indirect is only ever used for JMP
                     self.stage = CpuStage::FetchAddrAdjust;
-                    return CpuReturnAction::Read((self.operand1 as u16) | ((self.operand2 as u16) << 8));
+                    self.addr = (self.operand1 as u16) | ((self.operand2 as u16) << 8);
+                    return CpuReturnAction::Read(self.addr);
                 }
-                _ => { println!("Fallthrough on FetchOp2 with {:?}", self.stage); self.stage = CpuStage::Execute; return CpuReturnAction::None }
+                _ => { println!("Fallthrough on FetchOp2 with {:?}", self.instruction); self.stage = CpuStage::Execute; return CpuReturnAction::None }
             }
         } else if self.stage == CpuStage::FetchAddrAdjust {
             //do nothing with the value, it's a dummy read
@@ -191,18 +485,23 @@ impl Cpu {
             let mode = Cpu::instruction_read_write_type(self.instruction);
             match mode {
                 AddrMode::ZeroPageX => {
-                    self.operand1 = self.operand1.wrapping_add(self.x);
+                    self.addr = self.operand1.wrapping_add(self.x) as u16;
                     self.stage = CpuStage::Execute;
-                    return CpuReturnAction::Read(self.operand1 as u16);
+                    if read {
+                        return CpuReturnAction::Read(self.addr);
+                    }
                 }
                 AddrMode::ZeroPageY => {
-                    self.operand1 = self.operand1.wrapping_add(self.y);
+                    self.addr = self.operand1.wrapping_add(self.y) as u16;
                     self.stage = CpuStage::Execute;
-                    return CpuReturnAction::Read(self.operand1 as u16);
+                    if read {
+                        return CpuReturnAction::Read(self.addr);
+                    }
                 }
                 AddrMode::AbsoluteX => {
                     let (op1, wrapped) = self.operand1.overflowing_add(self.x);
-                    let ret = CpuReturnAction::Read((op1 as u16) | ((self.operand2 as u16) << 8));
+                    self.addr = (op1 as u16) | ((self.operand2 as u16) << 8);
+                    let ret = CpuReturnAction::Read(self.addr);
                     if wrapped || (read && write) {
                         self.stage = CpuStage::FetchAddrAdjust2;
                     } else {
@@ -212,7 +511,8 @@ impl Cpu {
                 }
                 AddrMode::AbsoluteY => {
                     let (op1, wrapped) = self.operand1.overflowing_add(self.x);
-                    let ret = CpuReturnAction::Read((op1 as u16) | ((self.operand2 as u16) << 8));
+                    self.addr = (op1 as u16) | ((self.operand2 as u16) << 8);
+                    let ret = CpuReturnAction::Read(self.addr);
                     if wrapped || (read && write) {
                         self.stage = CpuStage::FetchAddrAdjust2;
                     } else {
@@ -223,7 +523,7 @@ impl Cpu {
                 AddrMode::Indirect => {
                     //again just JMP
                     self.addr = val.unwrap() as u16; //load lower byte
-                    self.stage = CpuStage::Execute;
+                    self.stage = CpuStage::FetchAddrAdjust2;
                     return CpuReturnAction::Read((self.operand1.wrapping_add(1) as u16) | ((self.operand2 as u16) << 8));
                 }
                 AddrMode::IndirectX => {
@@ -234,7 +534,7 @@ impl Cpu {
                     self.stage = CpuStage::FetchAddrAdjust2;
                     return CpuReturnAction::Read(self.operand1 as u16);
                 }
-                _ => { println!("Fallthrough on FetchAddrAdjust with {:?}", self.stage); self.stage = CpuStage::Execute; return CpuReturnAction::None }
+                _ => { println!("Fallthrough on FetchAddrAdjust with {:?}", self.instruction); self.stage = CpuStage::Execute; return CpuReturnAction::None }
             }
         } else if self.stage == CpuStage::FetchAddrAdjust2 {
             //do nothing with the value, it's usually a dummy read
@@ -248,7 +548,13 @@ impl Cpu {
                     } else {
                         addr = addr.wrapping_add(self.y as u16);
                     }
-                    return CpuReturnAction::Read(addr);
+                    self.addr = addr;
+                    return CpuReturnAction::Read(self.addr);
+                }
+                AddrMode::Indirect => { //Once more it is just JMP
+                    self.addr |= (val.unwrap() as u16) << 8;
+                    self.stage = CpuStage::Execute;
+                    //No return, straight to execute
                 }
                 AddrMode::IndirectX => {
                     self.addr = val.unwrap() as u16;
@@ -260,7 +566,7 @@ impl Cpu {
                     self.stage = CpuStage::FetchAddrAdjust3;
                     return CpuReturnAction::Read(self.operand1.wrapping_add(1) as u16);
                 }
-                _ => { println!("Fallthrough on FetchAddrAdjust2 with {:?}", self.stage); self.stage = CpuStage::Execute; return CpuReturnAction::None }
+                _ => { println!("Fallthrough on FetchAddrAdjust2 with {:?}", self.instruction); self.stage = CpuStage::Execute; return CpuReturnAction::None }
             }
         } else if self.stage == CpuStage::FetchAddrAdjust3 {
             //do nothing with the value, it's a dummy read
@@ -289,7 +595,7 @@ impl Cpu {
                         return CpuReturnAction::Read(self.addr);
                     }
                 }
-                _ => { println!("Fallthrough on FetchAddrAdjust3 with {:?}", self.stage); self.stage = CpuStage::Execute; return CpuReturnAction::None }
+                _ => { println!("Fallthrough on FetchAddrAdjust3 with {:?}", self.instruction); self.stage = CpuStage::Execute; return CpuReturnAction::None }
             }
         } else if self.stage == CpuStage::FetchAddrAdjust4 {
             self.val = val.unwrap();
@@ -299,11 +605,14 @@ impl Cpu {
                     self.stage = CpuStage::Execute;
                     return CpuReturnAction::Read(self.addr);
                 }
-                _ => { println!("Fallthrough on FetchAddrAdjust4 with {:?}", self.stage); self.stage = CpuStage::Execute; return CpuReturnAction::None }
+                _ => { println!("Fallthrough on FetchAddrAdjust4 with {:?}", self.instruction); self.stage = CpuStage::Execute; return CpuReturnAction::None }
             }
         }
 
         if self.stage == CpuStage::Execute {
+            if self.cycles == 0 {
+                self.tracelog();
+            }
             if val.is_some() {
                 self.val = val.unwrap();
             }
@@ -417,25 +726,66 @@ impl Cpu {
                         return self.push_stack((self.pc) as u8);
                     } else if self.cycles == 3 {
                         self.cycles += 1;
+                        let pc_old = self.pc;
                         self.pc = self.val as u16;
-                        return CpuReturnAction::ReadCallback(self.pc.wrapping_add(1), Box::new(move |val| {self.pc |= (val as u16) << 8})); //fetch straight into PCH
+                        self.stage = CpuStage::FetchIns;
+                        return CpuReturnAction::ReadCallback(pc_old, Box::new(|val, cpu: &mut Cpu| {cpu.pc |= (val as u16) << 8})); //fetch straight into PCH
                     }
                 } else if op == 0x40 { //RTI
-                    self.pop_stack_flags();
-                    self.pc = self.pop_stack_16();
+                    if self.cycles == 0 {
+                        self.cycles += 1;
+                        return self.pop_stack();
+                    } else if self.cycles == 1 {
+                        self.cycles += 1;
+                        self.restore_flags(self.val);
+                        return self.pop_stack();
+                    } else if self.cycles == 2 {
+                        self.cycles += 1;
+                        self.addr = self.val as u16;
+                        return self.pop_stack();
+                    } else if self.cycles == 3 {
+                        self.pc = self.addr | ((self.val as u16) << 8);
+                    }
                 } else if op == 0x60 { //RTS
-                    self.pc = self.pop_stack_16().wrapping_add(1);
+                    if self.cycles == 0 {
+                        self.cycles += 1;
+                        return self.pop_stack();
+                    } else if self.cycles == 1 {
+                        self.cycles += 1;
+                        self.addr = self.val as u16;
+                        return self.pop_stack();
+                    } else if self.cycles == 2 {
+                        self.cycles += 1;
+                        self.addr |= (self.val as u16) << 8;
+                        return CpuReturnAction::None;
+                    } else if self.cycles == 3 {
+                        self.pc = self.addr.wrapping_add(1);
+                    }
                 }
             } //0x04 is covered by earlier cases (NOP, BIT, STY, LDY, CPY, CPX)
             else if op & 0x1F == 0x08 {
                 if op == 0x08 { //PHP
-                    self.push_stack_flags();
+                    self.stage = CpuStage::FetchIns;
+                    return self.push_stack_flags();
                 } else if op == 0x28 { //PLP
-                    self.pop_stack_flags();
+                    if self.cycles == 0 {
+                        self.cycles += 1;
+                        return self.pop_stack();
+                    } else if self.cycles == 1 {
+                        self.restore_flags(self.val);
+                    }
                 } else if op == 0x48 { //PHA
-                    self.push_stack(self.a);
+                    self.stage = CpuStage::FetchIns;
+                    return self.push_stack(self.a);
                 } else if op == 0x68 { //PLA
-                    self.a = self.pop_stack();
+                    if self.cycles == 0 {
+                        self.cycles += 1;
+                        return self.pop_stack();
+                    } else if self.cycles == 1 {
+                        self.a = self.val;
+                        self.z = self.a == 0;
+                        self.n = self.a & 0x80 == 0x80;
+                    }
                 } else if op == 0x88 { //DEY
                     self.y = self.y.wrapping_sub(1);
                     self.z = self.y == 0;
@@ -454,7 +804,7 @@ impl Cpu {
                     self.n = self.x & 0x80 == 0x80;
                 }
             } else if op & 0x1F == 0x0C {
-                self.pc = self.addr; //JMP //todo
+                self.pc = self.addr; //JMP
             } else if op & 0x1F == 0x10 {
                 if op == 0x10 && !self.n {
                     self.pc = self.pc.wrapping_add_signed(self.val as i8 as i16); //BPL
@@ -494,6 +844,9 @@ impl Cpu {
             }
         }
         self.stage = CpuStage::FetchIns;
+        if write {
+            return CpuReturnAction::Write(self.addr, self.val);
+        }
         return CpuReturnAction::None;
     }
 
@@ -549,6 +902,10 @@ impl Cpu {
             }
             _ => unreachable!("impossible value range somehow")
         }
+        self.stage = CpuStage::FetchIns;
+        if write {
+            return CpuReturnAction::Write(self.addr, self.val);
+        }
         return CpuReturnAction::None;
     }
 
@@ -566,6 +923,12 @@ impl Cpu {
                 return CpuReturnAction::None;
             }
             _ => (),
+        }
+        if read && write {
+            if self.cycles == 0 {
+                self.cycles += 1;
+                return CpuReturnAction::Write(self.addr, self.val);
+            }
         }
 
         match op & 0xE0 { //actual implementations
@@ -667,8 +1030,9 @@ impl Cpu {
             _ => unreachable!("impossible value range somehow")
         }
 
+        self.stage = CpuStage::FetchIns;
         if write {
-            return CpuReturnAction::Write((self.operand1 as u16) | ((self.operand2 as u16) << 8), self.val);
+            return CpuReturnAction::Write(self.addr, self.val);
         }
         return CpuReturnAction::None;
         // if write && !read {
@@ -889,6 +1253,9 @@ impl Cpu {
                             AddrMode::AbsoluteX
                         }
                     },
+                    0x0A | 0x12 | 0x1A => {
+                        AddrMode::Implied
+                    }
                     _ => unreachable!("impossible value range somehow")
                 }
             },
@@ -915,19 +1282,13 @@ impl Cpu {
         return self.push_stack(val);
     }
 
-    fn push_stack_16(&mut self, val: u16) {
-        self.push_stack((val & 0xFF) as u8);
-        self.push_stack((val >> 8) as u8);
-    }
-
     fn pop_stack(&mut self) -> CpuReturnAction {
         self.s = self.s.wrapping_add(1);
         let addr = self.get_stack_addr();
         return CpuReturnAction::Read(addr);
     }
 
-    fn pop_stack_flags(&mut self) {
-        let flags = self.pop_stack();
+    fn restore_flags(&mut self, flags: u8) {
         self.n = (flags & 0b10000000) != 0;
         self.v = (flags & 0b01000000) != 0;
         //note the two values missing, that's intentional
@@ -935,158 +1296,5 @@ impl Cpu {
         self.i = (flags & 0b00000100) != 0;
         self.z = (flags & 0b00000010) != 0;
         self.c = (flags & 0b00000001) != 0;
-    }
-
-    fn pop_stack_16(&mut self) -> u16 {
-        let high = self.pop_stack() as u16;
-        let low = self.pop_stack() as u16;
-        return (high << 8) | low;
-    }
-
-    fn read_indirect_16(&mut self) -> u16 {
-        self.cycles += 3; //just for indirect JMP
-        let low_1 = self.read(self.pc);
-        let high_1 = self.read(self.pc.wrapping_add(1));
-        let addr_1 = (high_1 as u16) << 8 | low_1 as u16;
-        let addr_2 = (high_1 as u16) << 8 | low_1.wrapping_add(1) as u16; //weird bug where only the lower byte is incremented
-
-        let low_2 = self.bus.borrow_mut().read(addr_1);
-        let high_2 = self.bus.borrow_mut().read(addr_2);
-        return (high_2 as u16) << 8 | low_2 as u16;
-    }
-
-    fn get_x_indirect_addr(&mut self) -> u16 {
-        self.cycles += 4;
-        let zp = self.read(self.pc).wrapping_add(self.x);
-        return self.bus.borrow_mut().read_16(zp as u16);
-    }
-
-    fn read_x_indirect(&mut self) -> u8 {
-        let addr = self.get_x_indirect_addr();
-        return self.bus.borrow_mut().read(addr);
-    }
-
-    fn write_x_indirect(&mut self, val: u8) {
-        let addr = self.get_x_indirect_addr();
-        self.bus.borrow_mut().write(addr, val);
-    }
-
-    fn get_indirect_y_addr(&mut self) -> u16 {
-        self.cycles += 3; //todo: get the actual timing depending on page crossings and such
-        //todo: and the dummy read
-        let zp = self.read(self.pc);
-        return self.bus.borrow_mut().read_16(zp as u16).wrapping_add(self.y as u16);
-    }
-
-    fn read_indirect_y(&mut self) -> u8 {
-        let addr = self.get_indirect_y_addr();
-        return self.bus.borrow_mut().read(addr);
-    }
-
-    fn write_indirect_y(&mut self, val: u8) {
-        let addr = self.get_indirect_y_addr();
-        self.bus.borrow_mut().write(addr, val);
-    }
-
-    //notably, immediate mode does not get a get since it's not fetching an address
-
-    fn read_immediate(&mut self) -> u8 {
-        return self.read(self.pc);
-    }
-
-    fn write_immediate(&mut self, val: u8) {
-        self.pc += 1;
-        //that's it, just the increment
-    }
-
-    fn get_zero_page_addr(&mut self) -> u16 {
-        self.cycles += 1; //todo RMWs take 5 not 6, need to subtract 1 later
-        return self.read(self.pc) as u16;
-    }
-
-    fn read_zero_page(&mut self) -> u8 {
-        let addr = self.get_zero_page_addr();
-        return self.bus.borrow_mut().read(addr);
-    }
-
-    fn write_zero_page(&mut self, val: u8) {
-        let addr = self.get_zero_page_addr();
-        self.bus.borrow_mut().write(addr, val);
-    }
-
-    fn get_zero_page_x_addr(&mut self) -> u16 {
-        self.cycles += 2; //todo RMWs take 6 not 8, need to subtract 2 later
-        return self.read(self.pc).wrapping_add(self.x) as u16;
-    }
-
-    fn read_zero_page_x(&mut self) -> u8 {
-        let addr = self.get_zero_page_x_addr();
-        return self.bus.borrow_mut().read(addr);
-    }
-
-    fn write_zero_page_x(&mut self, val: u8) {
-        let addr = self.get_zero_page_x_addr();
-        self.bus.borrow_mut().write(addr, val);
-    }
-
-    fn get_zero_page_y_addr(&mut self) -> u16 {
-        self.cycles += 2;
-        return self.read(self.pc).wrapping_add(self.y) as u16;
-    }
-
-    fn read_zero_page_y(&mut self) -> u8 {
-        let addr = self.get_zero_page_y_addr();
-        return self.bus.borrow_mut().read(addr);
-    }
-
-    fn write_zero_page_y(&mut self, val: u8) {
-        let addr = self.get_zero_page_y_addr();
-        self.bus.borrow_mut().write(addr, val);
-    }
-
-    fn get_absolute_addr(&mut self) -> u16 {
-        self.cycles += 2;
-        return self.read_16(self.pc);
-    }
-
-    fn read_absolute(&mut self) -> u8 {
-        let addr = self.get_absolute_addr();
-        return self.bus.borrow_mut().read(addr);
-    }
-
-    fn write_absolute(&mut self, val: u8) {
-        let addr = self.get_absolute_addr();
-        self.bus.borrow_mut().write(addr, val);
-    }
-
-    fn get_absolute_x_addr(&mut self) -> u16 {
-        self.cycles += 2; //todo: determine page crossing stuff
-        //todo: RMWs take exactly 7 always, need to mess around with subtracting 1 and page crossing to ensure correct timing
-        return self.read_16(self.pc).wrapping_add(self.x as u16);
-    }
-
-    fn read_absolute_x(&mut self) -> u8 {
-        let addr = self.get_absolute_x_addr();
-        return self.bus.borrow_mut().read(addr);
-    }
-
-    fn write_absolute_x(&mut self, val: u8) {
-        let addr = self.get_absolute_x_addr();
-        return self.bus.borrow_mut().write(addr, val);
-    }
-
-    fn get_absolute_y_addr(&mut self) -> u16 {
-        self.cycles += 2; //todo: determine page crossing stuff, and whatever is up with STA on this and abs x
-        return self.read_16(self.pc).wrapping_add(self.y as u16);
-    }
-
-    fn read_absolute_y(&mut self) -> u8 {
-        let addr = self.get_absolute_y_addr();
-        return self.bus.borrow_mut().read(addr);
-    }
-
-    fn write_absolute_y(&mut self, val: u8) {
-        let addr = self.get_absolute_y_addr();
-        return self.bus.borrow_mut().write(addr, val);
     }
 }

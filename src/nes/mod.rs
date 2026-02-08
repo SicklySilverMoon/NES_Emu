@@ -4,3 +4,4 @@ pub mod nes;
 // pub mod mapper;
 pub mod bus;
 mod mapper;
+mod ram;

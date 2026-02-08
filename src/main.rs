@@ -11,9 +11,9 @@ use std::time::Duration;
 pub fn main() {
     let mut nes = nes::nes::Nes::new(fs::read(env::args().nth(1).unwrap()).unwrap());
     //nes.reset() is no longer needed, the reset is done in the NES constructor
-    // while !nes.is_halted() { //temp
-    //     nes.step();
-    // }
+    while !nes.is_halted() { //temp
+        nes.step();
+    }
 
 
     let sdl_context = sdl3::init().unwrap();

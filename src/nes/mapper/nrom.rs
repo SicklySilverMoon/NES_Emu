@@ -28,12 +28,18 @@ impl NROM {
         let splits = prg_rom.split_at(0x4000);
         let first: [u8; 0x4000] = splits.0.try_into().unwrap();
         let second: [u8; 0x4000] = splits.1.try_into().unwrap(); //either it's 0 as it was resized up to 0x8000, or it's the PRG-ROM cropped
+        let chr_arr: [u8; 0x2000];
+        if chr_rom.len() >= 0x2000 {
+            chr_arr = chr_rom.split_at(0x2000).0.try_into().unwrap();
+        } else {
+            chr_arr = [0; 0x2000];
+        }
         return NROM {
             nrom_type: nromtype,
             has_chr_ram: header[5] == 0,
             prg_rom_first: first,
             prg_rom_second: second,
-            chr_rom: chr_rom.split_at(0x2000).0.try_into().unwrap(),
+            chr_rom: chr_arr,
             prg_ram: [0; 0x2000],
         }
     }
@@ -47,8 +53,8 @@ impl Mapper for NROM {
             return self.prg_rom_first[addr as usize - 0x8000];
         } else if (0xC000..=0xFFFF).contains(&addr) {
             return match self.nrom_type {
-                NromType::NROM128 => { self.prg_rom_second[addr as usize - 0xC000] }
-                NromType::NROM256 => { self.prg_rom_first[addr as usize - 0xC000] }
+                NromType::NROM128 => { self.prg_rom_first[addr as usize - 0xC000] }
+                NromType::NROM256 => { self.prg_rom_second[addr as usize - 0xC000] }
             }
         }
         unreachable!("address outside NROM range")
